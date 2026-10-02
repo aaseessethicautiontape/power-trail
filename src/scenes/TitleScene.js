@@ -4,18 +4,17 @@ import { STARTERS, STARTER_KEYS, LEVEL_TUNING } from '../../shared/config.js';
 import { formFor } from '../../shared/level.js';
 import { load, save, newRunSeed } from '../save.js';
 import { pokemonKey } from '../assets.js';
+import { getScreen, safeRect, watchResize, RES } from '../layout/screen.js';
 import {
-  makeText, makeButton, makePanel, makeBadge, makeHearts, makeCog, shade,
+  makeText, makeButton, makePanel, makeBadge, makeHearts, makeCog, makeDialog, makeTappable, shade, px,
   FONT_TITLE, INK, TYPE_COLOURS,
 } from '../art/ui.js';
 
 const byId = new Map(dex.map((p) => [p.id, p]));
 
+// Card design size; real cards are sized to fit the screen in layout().
 const CARD_W = 236;
 const CARD_H = 320;
-const CARD_GAP = 28;
-const CARD_Y = 392;
-const BUTTON_Y = 632;
 
 // "Evolves at 8 and 20" from the starter's forms in shared/config.js.
 function evolvesLine(key) {
@@ -25,78 +24,181 @@ function evolvesLine(key) {
   return `Evolves at ${levels.slice(0, -1).join(', ')} and ${levels.at(-1)}`;
 }
 
+// Shrinks a text object to fit a width.
+const fitWidth = (t, maxW) => t.setScale(Math.min(1, maxW / t.width));
+
 export default class TitleScene extends Phaser.Scene {
   constructor() {
     super('TitleScene');
   }
 
   create() {
-    this.data_ = load();
-    this.selected = this.data_.run?.starter ?? STARTER_KEYS[0];
-    this.modal = null;
+    this.save_ = load();
+    this.selected = this.save_.run?.starter ?? STARTER_KEYS[0];
+    this.dialogKind = null;
+    this.dialog = null;
+    this.root = null;
+    this.firstLayout = true;
 
-    this.drawBackground();
-    this.drawLogo();
-    this.cards = STARTER_KEYS.map((key, i) => this.makeCard(key, i));
+    this.buildBackground();
+    this.layout();
+    watchResize(this, () => this.layout(), { immediate: () => this.stretchBackground() });
+  }
+
+  layout() {
+    const scr = getScreen(this);
+    this.drawBackground(scr);
+
+    // Rebuild the UI layer at the new size. Selection and open dialogs survive.
+    if (this.root) {
+      this.tweens.killTweensOf(this.root.getAll());
+      this.cards?.forEach((c) => this.tweens.killTweensOf(c.list));
+      this.root.destroy();
+    }
+    this.root = this.add.container(0, 0).setDepth(1);
+    if (scr.portrait) this.layoutPortrait(scr);
+    else this.layoutLandscape(scr);
     this.refreshCards(true);
-    this.drawButtons();
+
+    if (this.dialogKind) {
+      this.dialog?.root.destroy();
+      this.openDialog(this.dialogKind, false);
+    }
+    this.firstLayout = false;
+  }
+
+  // ---------- layouts ----------
+
+  layoutLandscape(scr) {
+    const s = scr.ui;
+    const gap = Math.max(8, 14 * s);
+    const area = safeRect(scr, Math.max(12, 16 * s));
+    const bar = this.drawTopBar(scr, area);
+
+    const logoFont = Math.min(108 * s, (area.width - 2 * (bar.dexW + gap * 2)) / this.logoRatio(), scr.h * 0.15);
+    const logoH = logoFont * 1.22;
+    this.drawLogo(scr.w / 2, area.top + logoH / 2, logoFont, s);
+    let y = area.top + Math.max(bar.h, logoH) + gap * 0.4;
+    y = this.drawBest(scr.w / 2, y, s, gap);
+
+    const bs = Phaser.Math.Clamp(Math.min(s, (scr.h * 0.16) / 84), 0.6, 1.4);
+    const btnBlock = 92 * bs;
+    const btnY = area.bottom - btnBlock / 2 - 4 * bs;
+    this.drawButtonsRow(scr.w / 2, btnY, bs, area.width);
+
+    const lift = 14 * s;
+    this.placeCards(4, 1, {
+      left: area.left, right: area.right, top: y + lift, bottom: area.bottom - btnBlock - gap,
+    }, s);
+  }
+
+  layoutPortrait(scr) {
+    const s = scr.ui;
+    const gap = Math.max(10, 14 * s);
+    const area = safeRect(scr, Math.max(14, 16 * s));
+    const bar = this.drawTopBar(scr, area);
+    let y = area.top + bar.h + gap;
+
+    const logoFont = Math.min(area.width / this.logoRatio(), scr.h * 0.085, 130);
+    const logoH = logoFont * 1.22;
+    this.drawLogo(scr.w / 2, y + logoH / 2, logoFont, s);
+    y += logoH + gap * 0.4;
+    y = this.drawBest(scr.w / 2, y, s, gap);
+
+    const bs = Phaser.Math.Clamp(s, 0.8, 1.2);
+    const blockBottom = this.drawButtonsStack(scr.w / 2, area.bottom, area.width, bs, gap);
+
+    const lift = 14 * s;
+    this.placeCards(2, 2, { left: area.left, right: area.right, top: y + lift, bottom: blockBottom - gap }, s);
   }
 
   // ---------- background: sky gradient, sun, drifting clouds, meadow hills ----------
 
-  drawBackground() {
-    const { width, height } = this.scale;
-    if (!this.textures.exists('title-sky')) {
-      const tex = this.textures.createCanvas('title-sky', width, height);
-      const ctx = tex.getContext();
-      const sky = ctx.createLinearGradient(0, 0, 0, height);
-      sky.addColorStop(0, '#5FAEF2');
-      sky.addColorStop(0.55, '#8EC9FF');
-      sky.addColorStop(1, '#D8F0FF');
-      ctx.fillStyle = sky;
-      ctx.fillRect(0, 0, width, height);
-      const sun = ctx.createRadialGradient(170, 90, 10, 170, 90, 360);
-      sun.addColorStop(0, 'rgba(255,250,215,0.95)');
-      sun.addColorStop(0.18, 'rgba(255,244,190,0.55)');
-      sun.addColorStop(1, 'rgba(255,244,190,0)');
-      ctx.fillStyle = sun;
-      ctx.fillRect(0, 0, width, height);
-      tex.refresh();
-    }
-    this.add.image(0, 0, 'title-sky').setOrigin(0);
-
+  buildBackground() {
+    if (!this.textures.exists('title-sky')) this.textures.createCanvas('title-sky', 4, 4);
+    this.sky = this.add.image(0, 0, 'title-sky').setOrigin(0);
     this.makeCloudTextures();
-    this.clouds = [];
     const rng = new Phaser.Math.RandomDataGenerator(['title']);
-    for (let i = 0; i < 7; i++) {
-      const cloud = this.add.image(rng.between(0, width), rng.between(30, 330), `cloud${i % 3}`);
-      const s = rng.realInRange(0.55, 1.1);
-      cloud.setScale(s).setAlpha(rng.realInRange(0.75, 0.95));
-      cloud.speed = 6 + 14 * s; // bigger clouds feel closer, so they move faster
-      this.clouds.push(cloud);
-    }
+    this.clouds = Array.from({ length: 8 }, (_, i) => {
+      const cloud = this.add.image(0, 0, `cloud${i % 3}`);
+      cloud.nx = rng.frac();
+      cloud.ny = rng.frac();
+      cloud.size = rng.realInRange(0.55, 1.1);
+      cloud.setAlpha(rng.realInRange(0.75, 0.95));
+      return cloud;
+    });
+    this.hills = this.add.graphics();
+    this.cloudsPlaced = false;
+  }
 
-    // Two layers of rolling meadow hills behind the buttons.
-    const hills = this.add.graphics();
-    const hill = (baseY, amp, colour, phase) => {
-      const pts = [new Phaser.Math.Vector2(0, height)];
-      for (let x = 0; x <= width; x += 20) {
-        const y = baseY - Math.sin(x / 210 + phase) * amp - Math.sin(x / 95 + phase * 2) * amp * 0.25;
+  // Cheap fix on every resize event so the edges never show the page behind.
+  stretchBackground() {
+    const { width, height } = this.scale;
+    this.sky.setDisplaySize(width, height);
+    this.drawHills(getScreen(this));
+    this.dialog?.root.list[0].setSize(width, height); // the dialog's dim layer
+  }
+
+  drawBackground(scr) {
+    const { w, h, ui } = scr;
+    const tex = this.textures.get('title-sky');
+    tex.setSize(Math.ceil(w), Math.ceil(h));
+    const ctx = tex.getContext();
+    const sky = ctx.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#5FAEF2');
+    sky.addColorStop(0.55, '#8EC9FF');
+    sky.addColorStop(1, '#D8F0FF');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, w, h);
+    const sx = Math.min(170 * ui, w * 0.2);
+    const sy = 90 * ui;
+    const sun = ctx.createRadialGradient(sx, sy, 10, sx, sy, 360 * ui);
+    sun.addColorStop(0, 'rgba(255,250,215,0.95)');
+    sun.addColorStop(0.18, 'rgba(255,244,190,0.55)');
+    sun.addColorStop(1, 'rgba(255,244,190,0)');
+    ctx.fillStyle = sun;
+    ctx.fillRect(0, 0, w, h);
+    tex.refresh();
+    this.sky.setTexture('title-sky').setDisplaySize(w, h);
+
+    // Clouds: keep their x while drifting, spread their height over the top of the screen.
+    const band = scr.portrait ? h * 0.5 : h * 0.45;
+    for (const c of this.clouds) {
+      c.setScale((c.size * ui) / RES);
+      if (!this.cloudsPlaced || c.x > w + c.displayWidth) c.x = c.nx * w;
+      c.y = 30 * ui + c.ny * band;
+      c.speed = (6 + 14 * c.size) * ui; // bigger clouds feel closer, so they move faster
+    }
+    this.cloudsPlaced = true;
+    this.drawHills(scr);
+  }
+
+  // Two layers of rolling meadow hills along the bottom, scaled to the screen.
+  drawHills({ w, h, ui, portrait }) {
+    const g = this.hills.clear();
+    const k = portrait ? Math.max(ui, 0.9) : ui;
+    const hill = (lift, amp, colour, phase) => {
+      const pts = [new Phaser.Math.Vector2(0, h)];
+      for (let x = 0; x <= w + 20; x += 20) {
+        const y = h - lift * k - Math.sin(x / (210 * k) + phase) * amp * k - Math.sin(x / (95 * k) + phase * 2) * amp * k * 0.25;
         pts.push(new Phaser.Math.Vector2(x, y));
       }
-      pts.push(new Phaser.Math.Vector2(width, height));
-      hills.fillStyle(colour, 1).fillPoints(pts, true);
+      pts.push(new Phaser.Math.Vector2(w + 20, h));
+      g.fillStyle(colour, 1).fillPoints(pts, true);
     };
-    hill(560, 26, 0x7bc44f, 0.6);
-    hill(600, 18, 0x8fd460, 2.2);
-    // A few flower dots on the front hill.
-    for (let i = 0; i < 40; i++) {
-      const x = rng.between(10, width - 10);
-      const y = rng.between(625, height - 8);
-      hills.fillStyle(rng.pick([0xffffff, 0xfff176, 0xff9ecb]), 0.9).fillCircle(x, y, rng.between(2, 4));
+    hill(160, 26, 0x7bc44f, 0.6);
+    hill(120, 18, 0x8fd460, 2.2);
+    // Flower dots on the front hill, seeded so they don't jump around on resize.
+    const rng = new Phaser.Math.RandomDataGenerator(['flowers']);
+    const count = Math.round((w / 1280) * 40);
+    for (let i = 0; i < count; i++) {
+      const x = rng.between(10, Math.max(11, w - 10));
+      const y = h - rng.realInRange(8, 95) * k;
+      g.fillStyle(rng.pick([0xffffff, 0xfff176, 0xff9ecb]), 0.9).fillCircle(x, y, rng.between(2, 4) * k);
     }
   }
 
+  // Cloud textures are drawn at RES so they stay sharp on retina screens.
   makeCloudTextures() {
     if (this.textures.exists('cloud0')) return;
     const shapes = [
@@ -104,14 +206,16 @@ export default class TitleScene extends Phaser.Scene {
       [[50, 55, 32], [90, 40, 44], [135, 55, 34]],
       [[55, 62, 36], [100, 48, 48], [150, 50, 42], [196, 64, 30], [240, 72, 22]],
     ];
+    const r = RES;
     shapes.forEach((puffs, i) => {
       const g = this.make.graphics({ add: false });
-      const w = Math.max(...puffs.map(([x, , r]) => x + r)) + 10;
-      for (const [x, y, r] of puffs) g.fillStyle(0xcfe6fb, 1).fillCircle(x, y + 8, r);
-      g.fillStyle(0xcfe6fb, 1).fillRoundedRect(30, 66, w - 50, 30, 15);
-      for (const [x, y, r] of puffs) g.fillStyle(0xffffff, 1).fillCircle(x, y, r);
-      g.fillStyle(0xffffff, 1).fillRoundedRect(30, 58, w - 50, 30, 15);
-      g.generateTexture(`cloud${i}`, w, 110);
+      const w = Math.max(...puffs.map(([x, , rad]) => x + rad)) + 10;
+      for (const [x, y, rad] of puffs) g.fillStyle(0xcfe6fb, 1).fillCircle(x * r, (y + 8) * r, rad * r);
+      g.fillRoundedRect(30 * r, 66 * r, (w - 50) * r, 30 * r, 15 * r);
+      g.fillStyle(0xffffff, 1);
+      for (const [x, y, rad] of puffs) g.fillCircle(x * r, y * r, rad * r);
+      g.fillRoundedRect(30 * r, 58 * r, (w - 50) * r, 30 * r, 15 * r);
+      g.generateTexture(`cloud${i}`, Math.ceil(w * r), Math.ceil(110 * r));
       g.destroy();
     });
   }
@@ -124,111 +228,194 @@ export default class TitleScene extends Phaser.Scene {
     }
   }
 
-  // ---------- logo ----------
+  // ---------- top bar, logo, best ----------
 
-  drawLogo() {
-    const { width } = this.scale;
-    const logo = makeText(this, width / 2, 92, 'POWER TRAIL', {
-      fontFamily: FONT_TITLE, fontSize: '108px', color: '#ffffff',
-      stroke: '#4A1D05', strokeThickness: 18, padding: { x: 12, y: 12 },
+  drawTopBar(scr, area) {
+    const s = scr.ui;
+    const dex = makeButton(this, 0, 0, 'Trail Dex', 'secondary', () => this.scene.start('DexScene'), {
+      scale: s, height: 56, fontSize: 24, width: 180,
+    });
+    const h = dex.btnH;
+    dex.setPosition(area.left + dex.btnW / 2, area.top + (h - 8 * s) / 2);
+    const cogSize = Math.max(44, 60 * s);
+    const cog = makeCog(this, area.right - cogSize / 2, area.top + cogSize / 2, () => this.openDialog('settings'), cogSize);
+    this.root.add([dex, cog]);
+    return { h: Math.max(h, cogSize), dexW: Math.max(dex.btnW, cogSize) };
+  }
+
+  // Width of the logo per 1px of font size, measured once.
+  logoRatio() {
+    if (!TitleScene.logoK) {
+      const t = this.logoText(100);
+      TitleScene.logoK = t.width / 100;
+      t.destroy();
+    }
+    return TitleScene.logoK;
+  }
+
+  logoText(font) {
+    return makeText(this, 0, 0, 'POWER TRAIL', {
+      fontFamily: FONT_TITLE, fontSize: px(font), color: '#ffffff',
+      stroke: '#4A1D05', strokeThickness: Math.max(6, font * 0.16), padding: { x: font * 0.1, y: font * 0.1 },
     }).setOrigin(0.5);
+  }
+
+  drawLogo(x, y, font, s) {
+    const logo = this.logoText(font).setPosition(x, y);
     const grad = logo.context.createLinearGradient(0, 0, 0, logo.height);
     grad.addColorStop(0.2, '#FFE14D');
     grad.addColorStop(0.55, '#FFB52E');
     grad.addColorStop(0.85, '#FB7A1E');
     logo.setFill(grad);
-    logo.setShadow(0, 10, 'rgba(40,20,0,0.35)', 0, true, true);
+    logo.setShadow(0, font * 0.09, 'rgba(40,20,0,0.35)', 0, true, true);
+    this.root.add(logo);
 
-    logo.setScale(0.6).setAlpha(0);
-    this.tweens.add({ targets: logo, scale: 1, alpha: 1, duration: 600, ease: 'Back.Out' });
-    this.tweens.add({
-      targets: logo, y: 86, scaleX: 1.03, scaleY: 1.03,
-      duration: 1300, yoyo: true, repeat: -1, ease: 'Sine.InOut', delay: 600,
+    const bob = () => this.tweens.add({
+      targets: logo, y: y - 4 * s, scaleX: 1.03, scaleY: 1.03,
+      duration: 1300, yoyo: true, repeat: -1, ease: 'Sine.InOut',
     });
-
-    if (this.data_.bestLevel > 0) {
-      const best = makeText(this, width / 2, 170, `Best: Level ${this.data_.bestLevel}`, {
-        fontFamily: FONT_TITLE, fontSize: '26px', color: '#ffffff', stroke: '#1E3A8A', strokeThickness: 6,
-      }).setOrigin(0.5);
-      const pill = this.add.graphics();
-      const w = best.width + 40;
-      pill.fillStyle(0x1e3a8a, 0.28).fillRoundedRect(width / 2 - w / 2, 170 - 20, w, 40, 20);
-      best.setDepth(1);
+    if (this.firstLayout) {
+      logo.setScale(0.6).setAlpha(0);
+      this.tweens.add({ targets: logo, scale: 1, alpha: 1, duration: 600, ease: 'Back.Out', onComplete: bob });
+    } else {
+      bob();
     }
+  }
+
+  drawBest(x, y, s, gap) {
+    if (!(this.save_.bestLevel > 0)) return y;
+    const font = Math.max(16, 26 * s);
+    const ph = font * 1.55;
+    const best = makeText(this, x, y + ph / 2, `Best: Level ${this.save_.bestLevel}`, {
+      fontFamily: FONT_TITLE, fontSize: px(font), color: '#ffffff', stroke: '#1E3A8A', strokeThickness: Math.max(4, 6 * s),
+    }).setOrigin(0.5);
+    const pill = this.add.graphics();
+    const w = best.width + font * 1.5;
+    pill.fillStyle(0x1e3a8a, 0.28).fillRoundedRect(x - w / 2, y, w, ph, ph / 2);
+    this.root.add([pill, best]);
+    return y + ph + gap * 0.5;
   }
 
   // ---------- starter cards ----------
 
-  makeCard(key, i) {
+  // Fits `cols` x `rows` cards inside rect, centred, keeping a card-like shape.
+  placeCards(cols, rows, rect, s) {
+    const cg = Math.max(10, 24 * s);
+    // Leave room for the selected card's glow ring so it never touches the edge, logo or buttons.
+    const gm = Math.max(8, 18 * s);
+    rect = { left: rect.left + gm, right: rect.right - gm, top: rect.top + gm * 0.5, bottom: rect.bottom - gm * 0.5 };
+    const availW = rect.right - rect.left;
+    const availH = rect.bottom - rect.top;
+    let cw = (availW - (cols - 1) * cg) / cols;
+    let ch = (availH - (rows - 1) * cg) / rows;
+    cw = Math.min(cw, CARD_W * 1.4, ch * 0.95);
+    ch = Math.min(ch, cw * 1.36);
+    const f = Math.min(cw / CARD_W, ch / 300, 1.4);
+    const blockW = cols * cw + (cols - 1) * cg;
+    const blockH = rows * ch + (rows - 1) * cg;
+    const x0 = (rect.left + rect.right) / 2 - blockW / 2 + cw / 2;
+    const y0 = rect.top + (availH - blockH) / 2 + ch / 2;
+    this.cards = STARTER_KEYS.map((key, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      return this.makeCard(key, i, x0 + col * (cw + cg), y0 + row * (ch + cg), cw, ch, f);
+    });
+  }
+
+  makeCard(key, i, x, y, cw, ch, f) {
     const formId = formFor(key, 1);
     const mon = byId.get(formId);
     const typeColour = TYPE_COLOURS[mon.types[0]] ?? 0xa8a77a;
     const startPower = mon.power * 1; // form power x level 1 (PRD rule 3)
+    const top = -ch / 2;
+    const b = Math.max(3, 4 * f); // panel border
 
-    const totalW = STARTER_KEYS.length * CARD_W + (STARTER_KEYS.length - 1) * CARD_GAP;
-    const x = this.scale.width / 2 - totalW / 2 + CARD_W / 2 + i * (CARD_W + CARD_GAP);
-    const top = -CARD_H / 2;
+    // Text block sizes, never smaller than readable on a phone.
+    const nameSize = Math.max(16, 32 * f);
+    const labelSize = Math.max(11, 13 * f);
+    const badgeSize = Math.max(18, 34 * f);
+    const evoSize = Math.max(12, 16 * f);
+    const strip = Math.max(6, 10 * f);
+    const pad = Math.max(6, 10 * f);
+    let showLabel = true;
+    const textH = () => nameSize * 1.25 + (showLabel ? labelSize * 1.5 : 0) + badgeSize * 1.3 + evoSize * 1.5 + pad * 1.5;
+    if (ch - textH() < ch * 0.45) showLabel = false; // tight cards drop the "START POWER" label
+    const backH = ch - textH() - strip - b;
 
     // Gold glow ring, shown when selected.
     const glow = this.add.graphics();
+    const gr = 24 * f;
     for (let k = 6; k >= 1; k--) {
-      glow.lineStyle(4, 0xffd54a, 0.08 + 0.06 * (6 - k));
-      glow.strokeRoundedRect(-CARD_W / 2 - 4 - k * 3, top - 4 - k * 3, CARD_W + 8 + k * 6, CARD_H + 8 + k * 6, 28 + k * 3);
+      const o = 4 * f + k * 3 * f;
+      glow.lineStyle(4 * f, 0xffd54a, 0.08 + 0.06 * (6 - k));
+      glow.strokeRoundedRect(-cw / 2 - o, top - o, cw + 2 * o, ch + 2 * o, gr + o);
     }
-    glow.lineStyle(6, 0xffc61a, 1).strokeRoundedRect(-CARD_W / 2 - 3, top - 3, CARD_W + 6, CARD_H + 6, 27);
+    glow.lineStyle(Math.max(3, 6 * f), 0xffc61a, 1).strokeRoundedRect(-cw / 2 - 3 * f, top - 3 * f, cw + 6 * f, ch + 6 * f, gr + 3 * f);
     glow.setAlpha(0);
 
-    const panel = makePanel(this, 0, 0, CARD_W, CARD_H);
+    const panel = makePanel(this, 0, 0, cw, ch, { scale: f });
 
     // Art backdrop in the type colour, with a soft spotlight behind the Pokémon.
-    const backH = 168;
+    const artY = top + b + backH * 0.53;
+    const artSize = Math.min(backH * 0.86, cw * 0.66);
     const back = this.add.graphics();
     back.fillStyle(shade(typeColour, 22), 1)
-      .fillRoundedRect(-CARD_W / 2 + 4, top + 4, CARD_W - 8, backH, { tl: 20, tr: 20, bl: 0, br: 0 });
-    back.fillStyle(0xffffff, 0.35).fillCircle(0, top + 92, 70);
-    back.fillStyle(0xffffff, 0.25).fillCircle(0, top + 92, 52);
-    back.fillStyle(typeColour, 1).fillRect(-CARD_W / 2 + 4, top + 4 + backH, CARD_W - 8, 10);
-    back.fillStyle(0x000000, 0.14).fillEllipse(0, top + 158, 104, 18);
-
-    const typePill = makeText(this, -CARD_W / 2 + 18, top + 18, mon.types[0].toUpperCase(), {
-      fontStyle: '900', fontSize: '13px', color: '#ffffff', stroke: '#00000033', strokeThickness: 0,
-    });
-    const pillBg = this.add.graphics();
-    pillBg.fillStyle(shade(typeColour, -22), 1)
-      .fillRoundedRect(typePill.x - 9, typePill.y - 3, typePill.width + 18, typePill.height + 6, 11);
+      .fillRoundedRect(-cw / 2 + b, top + b, cw - 2 * b, backH, { tl: gr - b, tr: gr - b, bl: 0, br: 0 });
+    back.fillStyle(0xffffff, 0.35).fillCircle(0, artY, artSize * 0.47);
+    back.fillStyle(0xffffff, 0.25).fillCircle(0, artY, artSize * 0.35);
+    back.fillStyle(typeColour, 1).fillRect(-cw / 2 + b, top + b + backH, cw - 2 * b, strip);
+    back.fillStyle(0x000000, 0.14).fillEllipse(0, artY + artSize * 0.42, artSize * 0.62, artSize * 0.11);
 
     let art;
     if (this.textures.exists(pokemonKey(formId))) {
-      art = this.add.image(0, top + 98, pokemonKey(formId));
-      art.setScale(148 / art.height);
+      art = this.add.image(0, artY, pokemonKey(formId));
+      art.setScale(artSize / art.height);
     } else {
-      art = makeText(this, 0, top + 90, '?', { fontFamily: FONT_TITLE, fontSize: '80px', color: '#ffffff' }).setOrigin(0.5);
+      art = makeText(this, 0, artY, '?', { fontFamily: FONT_TITLE, fontSize: px(artSize * 0.5), color: '#ffffff' }).setOrigin(0.5);
     }
     this.tweens.add({
-      targets: art, y: art.y - 4, duration: 1100 + i * 130, yoyo: true, repeat: -1, ease: 'Sine.InOut', delay: i * 170,
+      targets: art, y: art.y - 4 * f, duration: 1100 + i * 130, yoyo: true, repeat: -1, ease: 'Sine.InOut', delay: i * 170,
     });
 
-    const name = makeText(this, 0, top + backH + 42, STARTERS[key].label, {
-      fontFamily: FONT_TITLE, fontSize: '32px', color: INK,
-    }).setOrigin(0.5);
-    const powerLabel = makeText(this, 0, top + backH + 74, 'START POWER', {
-      fontStyle: '900', fontSize: '13px', color: '#8A7360',
-    }).setOrigin(0.5);
-    const badge = makeBadge(this, startPower, 'player', { y: top + backH + 102, fontSize: 34 });
-    const evolves = makeText(this, 0, top + backH + 138, evolvesLine(key), {
-      fontStyle: '700', fontSize: '16px', color: '#6B5745',
-    }).setOrigin(0.5);
+    const pillFont = Math.max(10, 13 * f);
+    const typePill = makeText(this, -cw / 2 + b + 12 * f, top + b + 10 * f, mon.types[0].toUpperCase(), {
+      fontStyle: '900', fontSize: px(pillFont), color: '#ffffff',
+    });
+    const pillBg = this.add.graphics();
+    pillBg.fillStyle(shade(typeColour, -22), 1)
+      .fillRoundedRect(typePill.x - pillFont * 0.7, typePill.y - pillFont * 0.25, typePill.width + pillFont * 1.4, typePill.height + pillFont * 0.5, pillFont);
+
+    let cy = top + b + backH + strip + pad * 0.6;
+    const next = (hgt) => { const c = cy + hgt / 2; cy += hgt; return c; };
+    const maxTextW = cw - 2 * pad;
+    const name = fitWidth(makeText(this, 0, next(nameSize * 1.25), STARTERS[key].label, {
+      fontFamily: FONT_TITLE, fontSize: px(nameSize), color: INK,
+    }).setOrigin(0.5), maxTextW);
+    const parts = [name];
+    if (showLabel) {
+      parts.push(makeText(this, 0, next(labelSize * 1.5), 'START POWER', {
+        fontStyle: '900', fontSize: px(labelSize), color: '#8A7360',
+      }).setOrigin(0.5));
+    }
+    parts.push(makeBadge(this, startPower, 'player', { y: next(badgeSize * 1.3), fontSize: badgeSize }));
+    parts.push(fitWidth(makeText(this, 0, next(evoSize * 1.5), evolvesLine(key), {
+      fontStyle: '700', fontSize: px(evoSize), color: '#6B5745',
+    }).setOrigin(0.5), maxTextW));
 
     // Tick in the corner when selected.
+    const tr = Math.max(11, 16 * f);
+    const tx = cw / 2 - b - tr - 4 * f;
+    const ty = top + b + tr + 4 * f;
     const tick = this.add.graphics();
-    tick.fillStyle(0x16a34a, 1).fillCircle(CARD_W / 2 - 22, top + 22, 16);
-    tick.lineStyle(5, 0xffffff, 1).beginPath();
-    tick.moveTo(CARD_W / 2 - 30, top + 22).lineTo(CARD_W / 2 - 24, top + 28).lineTo(CARD_W / 2 - 13, top + 15).strokePath();
+    tick.fillStyle(0x16a34a, 1).fillCircle(tx, ty, tr);
+    tick.lineStyle(Math.max(3, 5 * f), 0xffffff, 1).beginPath();
+    tick.moveTo(tx - tr * 0.5, ty).lineTo(tx - tr * 0.12, ty + tr * 0.38).lineTo(tx + tr * 0.55, ty - tr * 0.42).strokePath();
     tick.setAlpha(0);
 
-    const card = this.add.container(x, CARD_Y, [glow, panel, back, art, pillBg, typePill, name, powerLabel, badge, evolves, tick]);
-    card.setSize(CARD_W, CARD_H).setInteractive({ useHandCursor: true });
-    Object.assign(card, { key, glow, tick, hovered: false });
+    const card = this.add.container(x, y, [glow, panel, back, art, pillBg, typePill, ...parts, tick]);
+    makeTappable(card, cw, ch);
+    Object.assign(card, { key, glow, tick, hovered: false, baseY: y, lift: 14 * f });
+    this.root.add(card);
 
     card.on('pointerover', () => { card.hovered = true; this.refreshCards(); });
     card.on('pointerout', () => { card.hovered = false; this.refreshCards(); });
@@ -239,57 +426,87 @@ export default class TitleScene extends Phaser.Scene {
       this.tweens.add({ targets: art, scale: art.scale * 1.12, duration: 120, yoyo: true, ease: 'Quad.Out' });
     });
 
-    // Cards drop in one after another.
-    card.y = CARD_Y + 40;
-    card.setAlpha(0);
-    this.tweens.add({ targets: card, y: CARD_Y, alpha: 1, duration: 450, delay: 150 + i * 90, ease: 'Back.Out' });
+    // On first show the cards drop in one after another.
+    if (this.firstLayout) {
+      card.y = y + 40 * f;
+      card.setAlpha(0);
+      this.tweens.add({
+        targets: card, y, alpha: 1, duration: 450, delay: 150 + i * 90, ease: 'Back.Out',
+        onComplete: () => this.refreshCards(),
+      });
+    }
     return card;
   }
 
   refreshCards(instant = false) {
     for (const card of this.cards) {
       const selected = card.key === this.selected;
-      const lift = selected ? -14 : card.hovered ? -10 : 0;
+      const y = card.baseY - (selected ? card.lift : card.hovered ? card.lift * 0.7 : 0);
       const scale = selected ? 1.04 : 1;
       card.setDepth(selected ? 2 : card.hovered ? 1 : 0);
+      this.root.sort('depth');
       if (instant) {
         card.glow.setAlpha(selected ? 1 : 0);
         card.tick.setAlpha(selected ? 1 : 0);
+        if (!this.firstLayout) card.setY(y).setScale(scale);
         continue;
       }
-      this.tweens.add({ targets: card, y: CARD_Y + lift, scale, duration: 180, ease: 'Quad.Out' });
+      this.tweens.add({ targets: card, y, scale, duration: 180, ease: 'Quad.Out' });
       this.tweens.add({ targets: [card.glow, card.tick], alpha: selected ? 1 : 0, duration: 180 });
     }
-    // The drop-in tween targets CARD_Y, so apply the lift once it settles.
-    if (instant) this.time.delayedCall(700, () => this.refreshCards());
   }
 
   // ---------- buttons ----------
 
-  drawButtons() {
-    const { width } = this.scale;
-    const run = this.data_.run;
-
-    makeButton(this, 116, 54, 'Trail Dex', 'secondary', () => this.scene.start('DexScene'), {
-      height: 56, fontSize: 24, width: 180,
+  continueButton(x, y, bs, width, height = 84) {
+    const run = this.save_.run;
+    const cont = makeButton(this, x, y, 'CONTINUE', 'secondary', () => this.continueRun(), {
+      scale: bs, width, height, fontSize: 32, subtitle: `Level ${run.level}`,
     });
-    makeCog(this, width - 60, 50, () => this.openSettings());
+    // "Level 14 ❤❤♡" centred inside the button.
+    const hearts = makeHearts(this, 0, cont.subtitle.y, run.hearts, LEVEL_TUNING.lives, Math.max(12, 15 * bs));
+    const sub = cont.subtitle.setOrigin(1, 0.5);
+    const total = sub.width + 8 + hearts.width;
+    sub.x = -total / 2 + sub.width;
+    hearts.x = sub.x + 8 + hearts.width / 2;
+    cont.face.add(hearts);
+    return cont;
+  }
 
-    if (run) {
-      const cont = makeButton(this, width / 2 - 170, BUTTON_Y, 'CONTINUE', 'secondary', () => this.continueRun(), {
-        width: 300, height: 84, fontSize: 32, subtitle: `Level ${run.level}`,
-      });
-      // Small hearts next to "Level 14" inside the button.
-      cont.subtitle.x = -34;
-      cont.face.add(makeHearts(this, 48, 18, run.hearts, LEVEL_TUNING.lives, 15));
-      makeButton(this, width / 2 + 170, BUTTON_Y, 'START', 'main', () => this.confirmNewRun(), {
-        width: 300, height: 84, fontSize: 40,
-      });
+  drawButtonsRow(cx, y, bs, maxW) {
+    if (this.save_.run) {
+      const gap = 40 * bs;
+      const w = Math.min(300, (maxW / bs - 40) / 2);
+      const off = (w * bs + gap) / 2;
+      this.root.add(this.continueButton(cx - off, y, bs, w));
+      this.root.add(makeButton(this, cx + off, y, 'START', 'main', () => this.openDialog('confirm'), {
+        scale: bs, width: w, height: 84, fontSize: 40,
+      }));
     } else {
-      makeButton(this, width / 2, BUTTON_Y, 'START', 'main', () => this.startRun(), {
-        width: 320, height: 84, fontSize: 42,
-      });
+      this.root.add(makeButton(this, cx, y, 'START', 'main', () => this.startRun(), {
+        scale: bs, width: 320, height: 84, fontSize: 42,
+      }));
     }
+  }
+
+  // Full-width stacked buttons at the bottom (portrait). Returns the block's top y.
+  drawButtonsStack(cx, bottom, width, bs, gap) {
+    const h = 72;
+    const block = (h + 8) * bs;
+    const w = width / bs;
+    const startY = bottom - block + (h * bs) / 2;
+    if (this.save_.run) {
+      const contY = startY - block - gap * 0.6;
+      this.root.add(this.continueButton(cx, contY, bs, w, h));
+      this.root.add(makeButton(this, cx, startY, 'START', 'main', () => this.openDialog('confirm'), {
+        scale: bs, width: w, height: h, fontSize: 38,
+      }));
+      return contY - (h * bs) / 2;
+    }
+    this.root.add(makeButton(this, cx, startY, 'START', 'main', () => this.startRun(), {
+      scale: bs, width: w, height: h, fontSize: 38,
+    }));
+    return startY - (h * bs) / 2;
   }
 
   startRun() {
@@ -301,87 +518,43 @@ export default class TitleScene extends Phaser.Scene {
       stars: 0,
       history: [],
     };
-    this.data_.run = run;
-    save(this.data_);
+    this.save_.run = run;
+    save(this.save_);
     this.scene.start('LevelScene', { run });
   }
 
   continueRun() {
-    this.scene.start('LevelScene', { run: this.data_.run });
+    this.scene.start('LevelScene', { run: this.save_.run });
   }
 
-  // ---------- modals ----------
+  // ---------- dialogs (rebuilt on resize) ----------
 
-  openModal(w, h, build) {
-    if (this.modal) return;
-    const { width, height } = this.scale;
-    const shade_ = this.add.rectangle(0, 0, width, height, 0x0b1630, 0.5).setOrigin(0).setInteractive();
-    const panel = makePanel(this, width / 2, height / 2, w, h);
-    const close = () => {
-      shade_.destroy();
-      panel.destroy();
-      this.modal = null;
-    };
-    this.modal = { shade: shade_, panel };
-    shade_.setDepth(10);
-    panel.setDepth(11);
-    build(panel, close);
-    panel.setScale(0.85).setAlpha(0);
-    this.tweens.add({ targets: panel, scale: 1, alpha: 1, duration: 220, ease: 'Back.Out' });
-  }
-
-  confirmNewRun() {
-    const run = this.data_.run;
-    this.openModal(560, 270, (panel, close) => {
-      panel.add(makeText(this, 0, -80, 'Start a new run?', {
-        fontFamily: FONT_TITLE, fontSize: '40px', color: INK,
-      }).setOrigin(0.5));
-      panel.add(makeText(this, 0, -24, `Your Level ${run.level} run will be lost.`, {
-        fontStyle: '700', fontSize: '22px', color: '#6B5745',
-      }).setOrigin(0.5));
-      panel.add(makeButton(this, -120, 54, 'Cancel', 'secondary', close, { width: 200, height: 64, fontSize: 28 }));
-      panel.add(makeButton(this, 120, 54, 'New run', 'danger', () => this.startRun(), { width: 200, height: 64, fontSize: 28 }));
-    });
-  }
-
-  openSettings() {
-    const settings = this.data_.settings;
-    this.openModal(500, 340, (panel, close) => {
-      panel.add(makeText(this, 0, -120, 'Settings', {
-        fontFamily: FONT_TITLE, fontSize: '42px', color: INK,
-      }).setOrigin(0.5));
-      const row = (y, label, field) => {
-        panel.add(makeText(this, -190, y, label, { fontStyle: '900', fontSize: '24px' }).setOrigin(0, 0.5));
-        panel.add(this.makeToggle(160, y, settings[field], (on) => {
-          settings[field] = on;
-          save(this.data_);
-        }));
+  openDialog(kind, animate = true) {
+    if (this.dialog && this.dialogKind === kind && animate) return;
+    this.dialogKind = kind;
+    const settings = this.save_.settings;
+    const spec = kind === 'settings'
+      ? {
+        title: 'Settings',
+        width: 500,
+        toggles: [
+          { label: 'Hint mode', get: () => settings.hint, set: (on) => { settings.hint = on; save(this.save_); } },
+          { label: 'Reduce motion', get: () => settings.reduceMotion, set: (on) => { settings.reduceMotion = on; save(this.save_); } },
+        ],
+        buttons: [{ label: 'Done', colour: 'main', onClick: (close) => close() }],
+      }
+      : {
+        title: 'Start a new run?',
+        message: `Your Level ${this.save_.run.level} run will be lost.`,
+        width: 560,
+        buttons: [
+          { label: 'Cancel', colour: 'secondary', onClick: (close) => close() },
+          { label: 'New run', colour: 'danger', onClick: () => this.startRun() },
+        ],
       };
-      row(-40, 'Hint mode', 'hint');
-      row(30, 'Reduce motion', 'reduceMotion');
-      panel.add(makeButton(this, 0, 112, 'Done', 'main', close, { width: 180, height: 60, fontSize: 28 }));
+    this.dialog = makeDialog(this, spec, {
+      animate,
+      onClose: () => { this.dialogKind = null; this.dialog = null; },
     });
-  }
-
-  makeToggle(x, y, on, onChange) {
-    const w = 88;
-    const h = 44;
-    const g = this.add.graphics();
-    const knob = this.add.circle(0, 0, h / 2 - 5, 0xffffff);
-    const c = this.add.container(x, y, [g, knob]);
-    const draw = () => {
-      g.clear();
-      g.fillStyle(on ? 0x15803d : 0x94a3b8, 1).fillRoundedRect(-w / 2, -h / 2 + 3, w, h, h / 2);
-      g.fillStyle(on ? 0x22c55e : 0xcbd5e1, 1).fillRoundedRect(-w / 2, -h / 2, w, h, h / 2);
-      knob.x = on ? w / 2 - h / 2 : -w / 2 + h / 2;
-    };
-    draw();
-    c.setSize(w, h).setInteractive({ useHandCursor: true });
-    c.on('pointerup', () => {
-      on = !on;
-      draw();
-      onChange(on);
-    });
-    return c;
   }
 }

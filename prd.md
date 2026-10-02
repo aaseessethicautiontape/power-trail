@@ -162,8 +162,8 @@ Rules for the build:
 - Mystery boxes have a bobbing "?" speech bubble. The Lucky Egg sits on a little glowing pedestal.
 - Tap a stop you can reach: your Pokémon hops along the path to it, then the battle plays (6.5).
 - Tap a locked stop: a small shake and a lock icon. Nothing happens.
-- Camera: follows your Pokémon. Drag to look around. Scroll wheel or pinch to zoom between 0.6× and 1.2×. A tap that moved less than 10px counts as a tap, more counts as a drag.
-- HUD: top left power pill (big number, your Pokémon's icon), top centre "Level 7 · Coral Beach", top right hearts, bottom right pause button. HUD stays fixed while the camera moves.
+- Camera: follows your Pokémon. Drag (mouse or one finger) to look around, with a little inertia. Scroll wheel or two-finger pinch to zoom. Zoom limits depend on the screen (section 7.7). A tap that moved less than 10px counts as a tap, more counts as a drag.
+- HUD: top left power pill (big number, your Pokémon's icon), top centre "Level 7 · Coral Beach", top right hearts, bottom right pause button. HUD stays fixed while the camera moves and never zooms with the map (it lives in its own UI scene, section 7.7). On narrow portrait screens the level name moves under the power pill.
 - Hold on any Pokémon for 0.5 seconds: an info card shows its art, name, types, and the maths: "Bulbasaur 318 × Level 1 × Alpha 14 = 4,452". This card can fetch the live PokéAPI entry to show the 6 stats.
 
 ### 6.5 Battle feel
@@ -210,7 +210,7 @@ Draw everything in code with Phaser Graphics, then bake each level's background 
 - **Decor**: scatter trees, bushes, rocks and biome props around the edges of plateaus (never on top of stops). Everything gets an ellipse shadow. Big decor in front of the map edges for depth.
 - **Ambient particles** per biome (section 7.2) plus a soft vignette.
 - **Layout**: stops are placed inside their zone's plateau with seeded random placement and at least 140px between stops, so retrying a level shows the exact same map. Use a separate seed from the level: `hashSeed(level.seed, 'layout')`.
-- **World size**: 1280 wide, roughly 560px of height per zone plus space for the boss. The map climbs from bottom to top with plateaus offset left and right so the path zigzags.
+- **World size**: two layouts from the same level (section 7.7). **Wide** (landscape screens): 1280 wide, roughly 560px of height per zone. **Tall** (portrait screens): 760 wide, plateaus stacked more vertically, roughly 640px per zone. Both climb from bottom to top with plateaus offset left and right so the path zigzags. Same stops, same numbers, only positions change.
 
 Optional upgrade later: if `public/biomes/<biome>.png` exists, use it as the ground layer and draw only paths, stops and particles on top. These can be painted or generated later.
 
@@ -256,6 +256,42 @@ Optional upgrade later: if `public/biomes/<biome>.png` exists, use it as the gro
 - Only load the sprites the current level needs, and start loading the next level's sprites while the clear panel is up.
 - Should run at 60fps on a school Chromebook and a phone.
 
+### 7.7 Responsive and mobile (applies to every screen)
+
+The game fills the whole browser window and re-lays itself out live while the window is resized or the phone is rotated. No letterbox bars, no reload, no lost progress.
+
+**Canvas**
+- Phaser `Scale.RESIZE`: the canvas is always exactly the window size. Use `100dvh` so mobile browser bars don't cut it off.
+- `index.html`: `<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">`, `html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; }`, canvas `touch-action: none` so drags and pinches never scroll or zoom the page.
+- Text and generated textures render at `min(devicePixelRatio, 2)` so they stay sharp on phones and retina screens.
+
+**Screen sizes**
+- `src/layout/screen.js` exports `getScreen(scene)` returning `{ w, h, portrait, compact, ui, safe }`:
+  - `portrait` = h > w
+  - `compact` = the short side is under 500px (phones)
+  - `ui` = a UI scale factor, `clamp(min(w / 1280, h / 720), 0.6, 1.4)`, bumped up to at least 0.8 on compact screens so text stays readable
+  - `safe` = safe-area insets (notch, home bar) read from CSS `env(safe-area-inset-*)`
+- Every scene has a `layout()` method that places everything from `getScreen`. It runs on create and on every `this.scale.on('resize')`, debounced to about 100ms. Nothing in a scene uses fixed pixel positions from a 1280×720 design.
+
+**Per screen**
+- Title, landscape: 4 starter cards in a row. Portrait: logo on top, cards in a 2×2 grid, buttons stacked full-width at the bottom. Very small phones: cards shrink but art, name and power stay readable.
+- Level map: picks the **wide** world on landscape screens and the **tall** world on portrait screens. Rotating the phone rebuilds the map layout and the baked background, keeps every taken stop and the current power, and keeps the camera centred on the player. Resizing without changing orientation only moves the camera bounds and zoom.
+- Map zoom: the default zoom fits the world's width to the screen width (clamped). Pinch and wheel zoom between 0.8× and 2× of that default.
+- HUD, panels, banners, item cards and the info card live in a separate `UIScene` that runs on top of the map scene, so camera zoom never shrinks them. They use `ui` scale and stay inside the safe area.
+- Panels (level clear, game over, pause, info card): max 92% of screen width on phones, centred, buttons stacked vertically when the panel is narrower than 420px.
+- Trail Dex grid: the number of columns comes from the width (about 3 on a phone, 8 or more on a desktop). Scroll by drag with inertia.
+
+**Touch**
+- Every tappable thing has at least a 44×44px hit area on screen, even if it looks smaller.
+- Badges and labels on the map never get smaller than 18px on screen. When zoomed out, they counter-scale so they stay readable.
+- Pinch zoom needs `this.input.addPointer(1)`. Long-press (0.5s) opens the info card on touch, the same as hold on desktop.
+- No hover-only features. Hover effects are a bonus on desktop.
+
+**Performance on phones**
+- When `compact` is true: max 40 particles, smaller baked map texture, and skip the vignette blur if it drops frames.
+
+**Test sizes** (every phase from now on): 390×844 phone portrait, 844×390 phone landscape, 768×1024 tablet portrait, 1280×720, 1920×1080, plus dragging the browser window edge live while the game is running.
+
 ## 8. Code structure
 
 ```
@@ -268,7 +304,9 @@ power-trail/
   scripts/                   starter kit (build-dex, check-levels)
   tests/                     starter kit tests + new ones
   src/
-    main.js                  Phaser config (1280x720, Scale.FIT, centered), waits for fonts
+    main.js                  Phaser config (Scale.RESIZE, full window), waits for fonts
+    layout/
+      screen.js              getScreen(): size, portrait, compact, ui scale, safe areas
     save.js                  localStorage save, wrapped in try/catch
     assets.js                sprite URL helpers and fallbacks
     art/
@@ -280,7 +318,8 @@ power-trail/
     scenes/
       BootScene.js
       TitleScene.js
-      LevelScene.js          map + HUD + taps
+      LevelScene.js          map + taps (camera, zoom)
+      UIScene.js             HUD, panels, banners on top of LevelScene
       EvolutionScene.js
       DexScene.js
   api/                       Phase 8+
@@ -330,7 +369,7 @@ Same idea as before, now for a whole run.
 | 3 | Map art: biome renderer, plateaus, paths, stairs, water, decor, particles, stops and badges | Every biome looks right in a debug biome switcher |
 | 4 | Gameplay: taps, battles, items, egg, gates, boss, hearts, level clear, next level, evolution | A full run from level 1 to 10 works with all 4 starters |
 | 5 | Meta: Title polish, Continue, game over, Trail Dex, pause and settings | Refresh mid-run and Continue works |
-| 6 | Polish and performance pass, phone layout | 60fps, no console errors, works on a phone |
+| 6 | Polish and performance pass | 60fps on a phone, no console errors, every test size in 7.7 looks right |
 | 7 | Deployed to Vercel | Public URL works on phone and laptop |
 | 8 | Server decides | Cheated runs are rejected |
 | 9 | Leaderboard and Daily Trail | Top 10 shows server-verified results only |
@@ -360,6 +399,9 @@ Manual:
 - Refreshing the page mid-run and pressing Continue resumes the same level with the same hearts.
 - Trail Dex count goes up after beating a new Pokémon.
 - No console errors. Each sprite loads once.
+- Every screen looks right at all the test sizes in section 7.7, and dragging the window edge re-lays it out live without a reload.
+- Rotating a phone mid-level keeps power, taken stops and hearts.
+- Pinch zoom and drag work on a real phone and never scroll the page.
 
 ## 14. Out of scope
 
