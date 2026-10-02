@@ -1,5 +1,7 @@
 node_modules
 dist
 .DS_Store
+firebase-debug.log
 .vercel
 power-trail-firebase-adminsdk-fbsvc-f90507968c.json
+.env*

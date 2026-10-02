@@ -82,6 +82,7 @@ export function renderMap(scene, level, L, { compact = false } = {}) {
   WATER[style.water](g, L, pal, rng);
   drawPlateaus(g, L, pal, style, rng);
   drawPaths(g, L, pal, style, rng);
+  drawPatches(g, L, pal);
   drawConnectors(g, L, pal, style);
   drawSpots(g, L, pal);
   drawDecor(g, L, pal, style);
@@ -510,6 +511,16 @@ function drawPaths(g, L, pal, style, rng) {
   stamp(g, all, pal.path, 19);
   stamp(g, all, shade(pal.path, 6), 9, -2, -3);
   PATH_DETAIL[style.path](g, L, pal, rng, all);
+}
+
+// A slightly worn patch of ground under each stop's shadow (open ground, PRD 7.1).
+function drawPatches(g, L, pal) {
+  const worn = lerpColour(pal.top, pal.path, 0.35);
+  for (const o of L.patches) {
+    g.fillStyle(shade(pal.top, -10), 0.35).fillEllipse(o.x, o.y + 3, o.rx * 2.1, o.ry * 2.3);
+    g.fillStyle(worn, 0.55).fillEllipse(o.x, o.y, o.rx * 2, o.ry * 2);
+    g.fillStyle(lerpColour(pal.top, pal.path, 0.55), 0.45).fillEllipse(o.x - o.rx * 0.1, o.y - 1, o.rx * 1.3, o.ry * 1.2);
+  }
 }
 
 // Direction of travel at each path point, for planks/tiles/footprints.

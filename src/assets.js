@@ -17,6 +17,13 @@ export function itemArt(sprite) {
   return `${BASE}/items/${sprite}.png`;
 }
 
+// Is this image already waiting in (or loading on) this loader? Then don't queue it twice:
+// every sprite loads once (PRD 13).
+function queued(loader, key) {
+  // The loader's lists are Phaser CustomSets: their files live in .entries.
+  return [loader.list, loader.inflight, loader.queue].some((set) => set?.entries?.some((f) => f.key === key));
+}
+
 export const pokemonKey = (id) => `pkmn-${id}`;
 export const itemKey = (sprite) => `item-${sprite}`;
 
@@ -29,7 +36,7 @@ export function loadPokemon(scene, ids) {
 
   for (const id of new Set(ids)) {
     const key = pokemonKey(id);
-    if (scene.textures.exists(key) || pending.has(key)) continue;
+    if (scene.textures.exists(key) || pending.has(key) || queued(loader, key)) continue;
     const [first, ...rest] = pokemonArt(id);
     pending.set(key, rest);
     loader.image(key, first);
@@ -61,7 +68,7 @@ export function loadPokemon(scene, ids) {
 export function loadItems(scene, sprites) {
   for (const sprite of new Set(sprites)) {
     const key = itemKey(sprite);
-    if (scene.textures.exists(key)) continue;
+    if (scene.textures.exists(key) || queued(scene.load, key)) continue;
     scene.load.image(key, itemArt(sprite));
     scene.load.once(`filecomplete-image-${key}`, () => {
       scene.textures.get(key).setFilter(Phaser.Textures.FilterMode.NEAREST);

@@ -1,10 +1,13 @@
 import Phaser from 'phaser';
 import BootScene from './scenes/BootScene.js';
 import TitleScene from './scenes/TitleScene.js';
+import TitleBgScene from './scenes/TitleBgScene.js';
 import LevelScene from './scenes/LevelScene.js';
 import UIScene from './scenes/UIScene.js';
 import EvolutionScene from './scenes/EvolutionScene.js';
 import DexScene from './scenes/DexScene.js';
+import { load } from './save.js';
+import { setSoundMuted, setSoundEffectsEnabled, unlockAudio } from './audio.js';
 
 // Scale.RESIZE: the canvas is always exactly the window size (PRD 7.7).
 // Scenes place everything themselves in layout() from src/layout/screen.js.
@@ -14,7 +17,7 @@ const config = {
   backgroundColor: '#8EC9FF',
   scale: { mode: Phaser.Scale.RESIZE, width: '100%', height: '100%' },
   input: { activePointers: 2 }, // pinch zoom needs two pointers
-  scene: [BootScene, TitleScene, LevelScene, UIScene, EvolutionScene, DexScene],
+  scene: [BootScene, TitleBgScene, TitleScene, LevelScene, UIScene, EvolutionScene, DexScene],
 };
 
 // Text drawn before the font arrives would bake in the fallback font, so wait for it.
@@ -28,6 +31,11 @@ async function start() {
   } catch (err) {
     console.warn('Fonts failed to load, using fallbacks', err);
   }
+  const settings = load().settings;
+  setSoundMuted(settings.muted ?? true);
+  setSoundEffectsEnabled(settings.soundEffects ?? true);
+  document.addEventListener('pointerdown', unlockAudio, { passive: true });
+  document.addEventListener('keydown', unlockAudio);
   window.game = new Phaser.Game(config);
 }
 

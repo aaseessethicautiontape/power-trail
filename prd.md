@@ -120,6 +120,24 @@ Best play reaches 9,940 before the boss in 14 taps. Notice Rattata (253) is beat
 - Power grows about 130× inside a typical level (Hero Wars style big numbers), a few hundred × on long late levels
 - Every Lucky Egg trap punishes egg-first play
 
+### 4.7 Difficulty follows your scores
+
+The next level gets a little harder when you're doing well and a little easier when you're struggling. It must stay deterministic so the server can recheck it.
+
+- `shared/difficulty.js` exports `difficultyFor(results)`, where `results` is the list of finished levels so far: `{ level, stars, faints }`. It returns a whole number from -2 to +2:
+  - Average stars of the last 3 cleared levels 2.7 or more: +1. The last 5 all 3 stars: +2.
+  - Average 1.4 or less: -1. Also -1 if the previous level took 2 or more faints. Floor at -2.
+  - Fewer than 3 levels played: 0.
+- `generateLevel` takes an optional `difficulty` (default 0). Each step changes boss share by 0.04, gate share by 0.03 and trap chance by 0.1, clamped, and the boss must still be beatable with perfect play. Difficulty 0 builds exactly the same levels as before.
+- The level intro shows it: "🔥 Tougher trail: you've been crushing it!" for +1/+2, "🌱 Easier trail this time" for -1/-2, nothing for 0.
+- The server works out `results` itself from its own replay (never from numbers the browser sends), so difficulty can't be faked.
+
+### 4.8 Scores you can look back on
+
+- Every cleared level saves its best result in `save.bestByLevel[level] = { stars, power, starter, date }`.
+- Level clear shows "New best!" when you beat your old stars or power on that level.
+- Game over and the title's Continue card show the run's levels with their stars as a small row of chips (Level 1 ★★★, Level 2 ★★, ...). Tap a chip to see that level's power and best.
+
 ## 5. Starter kit (already done, don't rewrite)
 
 | File | What it does |
@@ -160,7 +178,11 @@ Rules for the build:
 - Every stop: Pokémon art with a soft shadow and a gentle idle bob, the power badge above (section 7.4), and a small name label on tap-and-hold.
 - Locked zones are visible but desaturated with a soft cloud of fog. When a gate falls, the fog blows away and the stairs light up.
 - Mystery boxes have a bobbing "?" speech bubble. The Lucky Egg sits on a little glowing pedestal.
-- Tap a stop you can reach: your Pokémon hops along the path to it, then the battle plays (6.5).
+- Stops can be tapped in ANY order. The map must never suggest an order (see Paths in 7.1).
+- Every stop you can currently reach has a soft pulsing ring at its feet. Locked ones don't.
+- Level 1 only, first time ever: a bouncing hand points at the weakest Pokémon with "Tap any Pokémon with a smaller number than yours!". It disappears after the first tap.
+- Tap a stop you can reach: your Pokémon runs straight to it across the open ground (free movement, no path to follow), stops just in front of it and attacks (6.5). After a win, your Pokémon stays where it fought.
+- Tap empty ground inside an open zone: your Pokémon runs there. Just for fun and positioning, it never changes the rules.
 - Tap a locked stop: a small shake and a lock icon. Nothing happens.
 - Camera: follows your Pokémon. Drag (mouse or one finger) to look around, with a little inertia. Scroll wheel or two-finger pinch to zoom. Zoom limits depend on the screen (section 7.7). A tap that moved less than 10px counts as a tap, more counts as a drag.
 - HUD: top left power pill (big number, your Pokémon's icon), top centre "Level 7 · Coral Beach", top right hearts, bottom right pause button. HUD stays fixed while the camera moves and never zooms with the map (it lives in its own UI scene, section 7.7). On narrow portrait screens the level name moves under the power pill.
@@ -204,7 +226,8 @@ The goal: it should look like a polished mobile game, bright and toy-like, the s
 Draw everything in code with Phaser Graphics, then bake each level's background into a RenderTexture once so it's fast.
 - **Base ground**: two-tone noise patches in the biome's ground colours, soft and blotchy, never flat.
 - **Plateaus**: each zone is a big rounded polygon with a light top face and a darker "cliff" band (24 to 40px) below it, like a block of earth. Add a soft drop shadow under each plateau.
-- **Path**: a winding path across each plateau joining the stops, in the biome's path colour with a slightly darker edge line and a few pebbles.
+- **Open ground, free movement (important)**: each plateau is open, walkable ground. There is NO path running through the stops, because that makes players think they must fight in order. The only road on a plateau is a short decorative trail from the entrance to the stairs up to the next zone, kept away from the stops. Stops stand on open grass (or sand, snow, etc.) spread around the plateau, each with a slightly worn patch under its shadow.
+- **Movement**: the player runs in a straight line to the target and stops about 70px in front of it. If the target is in a different zone, it runs to the stairs first, then on to the target. Run speed scales with distance, with the whole move capped at about 700ms. Small dust puffs while running, a little hop at the end. Decor stays at the plateau edges so straight runs never pass through trees or rocks.
 - **Stairs or bridges** between plateaus: stairs drawn as stacked light and dark stripes on the cliff band. Bridges are wooden planks over water. The gate Alpha stands at the top of them.
 - **Water**: rivers and pools between plateaus with a light rim, a foam edge and slow shimmering highlight lines.
 - **Decor**: scatter trees, bushes, rocks and biome props around the edges of plateaus (never on top of stops). Everything gets an ellipse shadow. Big decor in front of the map edges for depth.
@@ -312,7 +335,7 @@ power-trail/
     art/
       palettes.js            section 7.2 as data
       biomeRenderer.js       draws and bakes the map for a level
-      layout.js              places plateaus, paths, stairs and stops (seeded)
+      layout.js              places plateaus, the entrance-to-stairs trail, stairs and stops (seeded)
       effects.js             attack effects, sparkles, floating numbers, confetti
       ui.js                  buttons, panels, badges, hearts, stars
     scenes/
@@ -334,8 +357,9 @@ power-trail/
 ```
 {
   bestLevel, bestStars,
-  run: { starter, runSeed, level, hearts, stars, history: [ { level, attempts: [[stopIds...]] } ] } | null,
+  run: { starter, runSeed, level, hearts, stars, history: [ { level, difficulty, attempts: [[stopIds...]] } ], results: [ { level, stars, faints } ] } | null,
   dex: [ids of Pokémon beaten],
+  bestByLevel: { [level]: { stars, power, starter, date } },
   settings: { hint: false, reduceMotion: false }
 }
 ```
@@ -348,7 +372,7 @@ power-trail/
 Same idea as before, now for a whole run.
 - The browser sends `POST /api/run` with `{ starter, runSeed, history }`. No powers, no scores.
 - The server rebuilds every level with `generateLevel` (reading `shared/dex.json` itself) and replays every attempt with `playLevel`.
-- It checks: levels go 1, 2, 3 in order; every attempt except the last one on a level ended `fainted` (costs a heart) or `incomplete` (a free restart from the pause menu); the last attempt on each cleared level is `cleared`; hearts never go below 0 using the heart rules; stop ids are valid.
+- It recomputes each level's difficulty with `difficultyFor` from its own replay results and rebuilds the level with it. It checks: levels go 1, 2, 3 in order; every attempt except the last one on a level ended `fainted` (costs a heart) or `incomplete` (a free restart from the pause menu); the last attempt on each cleared level is `cleared`; hearts never go below 0 using the heart rules; stop ids are valid.
 - It returns `{ verified: true, levelsCleared, stars, hearts }` and the browser shows "✅ Verified" on game over.
 - Anything wrong returns 400 with a short reason.
 - The `window.powerTrail.setPower(n)` cheat hook (kept for teaching) changes the screen, but the server's answer ignores it.
@@ -358,7 +382,10 @@ Same idea as before, now for a whole run.
 - `POST /api/leaderboard` takes the same run body plus `initials` (exactly 3 letters A to Z). The server verifies the run and saves ONLY its own result. No real names (players are kids).
 - `GET /api/leaderboard` returns the top 10: initials, starter, levels cleared, stars.
 - **Daily Trail**: a button on the title that uses today's date as the run seed, so everyone plays the same levels that day. Separate daily top 10.
-- Storage: Upstash Redis through the Vercel Marketplace. Credentials only in Vercel environment variables.
+- Storage: Firestore, written ONLY by the Vercel server functions using the Firebase Admin SDK and a service account.
+  - Collections: `leaderboard_alltime` and `leaderboard_daily_<YYYY-MM-DD>`, one document per entry: `{ initials, starter, levelsCleared, stars, createdAt }`. Query top 10 ordered by levelsCleared desc, then stars desc (needs a composite index).
+  - Firestore security rules deny ALL reads and writes from browsers (`allow read, write: if false;`). The browser only ever talks to `/api/leaderboard`.
+  - The service account JSON never goes in the repo, never goes in `src/` or `public/`, and is never imported by browser code. Locally it's read from a gitignored file; on Vercel it lives in one environment variable `FIREBASE_SERVICE_ACCOUNT` (the JSON as base64). Also list the file in `.vercelignore`.
 
 ## 12. Phases
 

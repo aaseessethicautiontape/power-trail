@@ -1,0 +1,21 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "leaderboard_alltime",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "levelsCleared", "order": "DESCENDING" },
+        { "fieldPath": "stars", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "leaderboard_daily_2026-10-02",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "levelsCleared", "order": "DESCENDING" },
+        { "fieldPath": "stars", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

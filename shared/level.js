@@ -8,6 +8,7 @@
 import { STARTERS, BIOMES, ITEMS, LUCKY_EGG, LEVEL_TUNING as T } from './config.js';
 import { hashSeed, makeRng } from './rng.js';
 import { bestRun } from './rules.js';
+import { applyDifficulty } from './difficulty.js';
 
 export function formFor(starterKey, level) {
   const forms = STARTERS[starterKey].forms;
@@ -80,7 +81,13 @@ export function levelSeed(runSeed, starter, level) {
   return hashSeed(runSeed, starter, level);
 }
 
-export function generateLevel({ dex, level, starter, runSeed }) {
+// difficulty: -2 (easier) to +2 (tougher), from difficultyFor(run.results). 0 = the normal level.
+export function generateLevel({ dex, level, starter, runSeed, difficulty = 0 }) {
+  const base = buildLevel({ dex, level, starter, runSeed });
+  return difficulty ? applyDifficulty(base, difficulty) : base;
+}
+
+function buildLevel({ dex, level, starter, runSeed }) {
   const seed = levelSeed(runSeed, starter, level);
   const rng = makeRng(seed);
   const biome = biomeFor(level);

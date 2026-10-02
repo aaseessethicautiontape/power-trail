@@ -2,11 +2,13 @@ import Phaser from 'phaser';
 import dex from '../../shared/dex.json';
 import { STARTERS, STARTER_KEYS, LEVEL_TUNING } from '../../shared/config.js';
 import { formFor } from '../../shared/level.js';
-import { load, save, newRunSeed } from '../save.js';
+import { load, save, newRunSeed, dailyRunSeed } from '../save.js';
+import { setSoundMuted, setSoundEffectsEnabled } from '../audio.js';
 import { pokemonKey } from '../assets.js';
-import { getScreen, safeRect, watchResize, RES } from '../layout/screen.js';
+import { getScreen, safeRect, watchResize } from '../layout/screen.js';
 import {
   makeText, makeButton, makePanel, makeBadge, makeHearts, makeCog, makeDialog, makeTappable, shade, px,
+  makeLevelChips, showChipInfo, levelChipLines,
   FONT_TITLE, INK, TYPE_COLOURS,
 } from '../art/ui.js';
 
@@ -79,12 +81,17 @@ export default class TitleScene extends Phaser.Scene {
     const logoH = logoFont * 1.22;
     this.drawLogo(scr.w / 2, area.top + logoH / 2, logoFont, s);
     let y = area.top + Math.max(bar.h, logoH) + gap * 0.4;
-    y = this.drawBest(scr.w / 2, y, s, gap);
+    // Short landscape screens (phones on their side): the level chips share the Best row, so the
+    // starter cards keep their height.
+    const inline = scr.h < 500 ? this.runChips(area.width * 0.6, Math.max(0.8, s)) : null;
+    y = this.drawBest(scr.w / 2, y, s, gap, inline);
 
     const bs = Phaser.Math.Clamp(Math.min(s, (scr.h * 0.16) / 84), 0.6, 1.4);
-    const btnBlock = 92 * bs;
+    let btnBlock = 92 * bs;
     const btnY = area.bottom - btnBlock / 2 - 4 * bs;
-    this.drawButtonsRow(scr.w / 2, btnY, bs, area.width);
+    const cont = this.drawButtonsRow(scr.w / 2, btnY, bs, area.width);
+    // This run's level chips sit on top of the Continue button.
+    if (cont && !inline) btnBlock += this.drawRunChips(cont.x, cont.y - cont.btnH / 2 - gap * 0.5, cont.btnW, bs) + gap * 0.5;
 
     const lift = 14 * s;
     this.placeCards(4, 1, {
@@ -112,120 +119,42 @@ export default class TitleScene extends Phaser.Scene {
     this.placeCards(2, 2, { left: area.left, right: area.right, top: y + lift, bottom: blockBottom - gap }, s);
   }
 
-  // ---------- background: sky gradient, sun, drifting clouds, meadow hills ----------
+  // ---------- background: a real Sunny Meadow map (TitleBgScene) under a soft wash ----------
 
   buildBackground() {
-    if (!this.textures.exists('title-sky')) this.textures.createCanvas('title-sky', 4, 4);
-    this.sky = this.add.image(0, 0, 'title-sky').setOrigin(0);
-    this.makeCloudTextures();
-    const rng = new Phaser.Math.RandomDataGenerator(['title']);
-    this.clouds = Array.from({ length: 8 }, (_, i) => {
-      const cloud = this.add.image(0, 0, `cloud${i % 3}`);
-      cloud.nx = rng.frac();
-      cloud.ny = rng.frac();
-      cloud.size = rng.realInRange(0.55, 1.1);
-      cloud.setAlpha(rng.realInRange(0.75, 0.95));
-      return cloud;
-    });
-    this.hills = this.add.graphics();
-    this.cloudsPlaced = false;
+    this.scene.launch('TitleBgScene');
+    this.scene.sendToBack('TitleBgScene');
+    this.events.once('shutdown', () => this.scene.stop('TitleBgScene'));
+    if (!this.textures.exists('title-wash')) this.textures.createCanvas('title-wash', 4, 4);
+    this.wash = this.add.image(0, 0, 'title-wash').setOrigin(0);
   }
 
-  // Cheap fix on every resize event so the edges never show the page behind.
+  // Cheap fix on every resize event so the wash always covers the screen.
   stretchBackground() {
     const { width, height } = this.scale;
-    this.sky.setDisplaySize(width, height);
-    this.drawHills(getScreen(this));
+    this.wash.setDisplaySize(width, height);
     this.dialog?.root.list[0].setSize(width, height); // the dialog's dim layer
   }
 
+  // Light at the top behind the logo, darker at the bottom behind the buttons, so the UI reads
+  // clearly over the busy map.
   drawBackground(scr) {
-    const { w, h, ui } = scr;
-    const tex = this.textures.get('title-sky');
-    tex.setSize(Math.ceil(w), Math.ceil(h));
+    const { w, h } = scr;
+    const tw = Math.max(4, Math.ceil(w / 4));
+    const th = Math.max(4, Math.ceil(h / 4));
+    const tex = this.textures.get('title-wash');
+    tex.setSize(tw, th);
     const ctx = tex.getContext();
-    const sky = ctx.createLinearGradient(0, 0, 0, h);
-    sky.addColorStop(0, '#5FAEF2');
-    sky.addColorStop(0.55, '#8EC9FF');
-    sky.addColorStop(1, '#D8F0FF');
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, w, h);
-    const sx = Math.min(170 * ui, w * 0.2);
-    const sy = 90 * ui;
-    const sun = ctx.createRadialGradient(sx, sy, 10, sx, sy, 360 * ui);
-    sun.addColorStop(0, 'rgba(255,250,215,0.95)');
-    sun.addColorStop(0.18, 'rgba(255,244,190,0.55)');
-    sun.addColorStop(1, 'rgba(255,244,190,0)');
-    ctx.fillStyle = sun;
-    ctx.fillRect(0, 0, w, h);
+    ctx.clearRect(0, 0, tw, th);
+    const grad = ctx.createLinearGradient(0, 0, 0, th);
+    grad.addColorStop(0, 'rgba(255,255,255,0.45)');
+    grad.addColorStop(0.3, 'rgba(255,255,255,0.12)');
+    grad.addColorStop(0.65, 'rgba(15,40,90,0.05)');
+    grad.addColorStop(1, 'rgba(15,40,90,0.4)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, tw, th);
     tex.refresh();
-    this.sky.setTexture('title-sky').setDisplaySize(w, h);
-
-    // Clouds: keep their x while drifting, spread their height over the top of the screen.
-    const band = scr.portrait ? h * 0.5 : h * 0.45;
-    for (const c of this.clouds) {
-      c.setScale((c.size * ui) / RES);
-      if (!this.cloudsPlaced || c.x > w + c.displayWidth) c.x = c.nx * w;
-      c.y = 30 * ui + c.ny * band;
-      c.speed = (6 + 14 * c.size) * ui; // bigger clouds feel closer, so they move faster
-    }
-    this.cloudsPlaced = true;
-    this.drawHills(scr);
-  }
-
-  // Two layers of rolling meadow hills along the bottom, scaled to the screen.
-  drawHills({ w, h, ui, portrait }) {
-    const g = this.hills.clear();
-    const k = portrait ? Math.max(ui, 0.9) : ui;
-    const hill = (lift, amp, colour, phase) => {
-      const pts = [new Phaser.Math.Vector2(0, h)];
-      for (let x = 0; x <= w + 20; x += 20) {
-        const y = h - lift * k - Math.sin(x / (210 * k) + phase) * amp * k - Math.sin(x / (95 * k) + phase * 2) * amp * k * 0.25;
-        pts.push(new Phaser.Math.Vector2(x, y));
-      }
-      pts.push(new Phaser.Math.Vector2(w + 20, h));
-      g.fillStyle(colour, 1).fillPoints(pts, true);
-    };
-    hill(160, 26, 0x7bc44f, 0.6);
-    hill(120, 18, 0x8fd460, 2.2);
-    // Flower dots on the front hill, seeded so they don't jump around on resize.
-    const rng = new Phaser.Math.RandomDataGenerator(['flowers']);
-    const count = Math.round((w / 1280) * 40);
-    for (let i = 0; i < count; i++) {
-      const x = rng.between(10, Math.max(11, w - 10));
-      const y = h - rng.realInRange(8, 95) * k;
-      g.fillStyle(rng.pick([0xffffff, 0xfff176, 0xff9ecb]), 0.9).fillCircle(x, y, rng.between(2, 4) * k);
-    }
-  }
-
-  // Cloud textures are drawn at RES so they stay sharp on retina screens.
-  makeCloudTextures() {
-    if (this.textures.exists('cloud0')) return;
-    const shapes = [
-      [[60, 60, 40], [105, 45, 52], [155, 62, 38], [190, 72, 26]],
-      [[50, 55, 32], [90, 40, 44], [135, 55, 34]],
-      [[55, 62, 36], [100, 48, 48], [150, 50, 42], [196, 64, 30], [240, 72, 22]],
-    ];
-    const r = RES;
-    shapes.forEach((puffs, i) => {
-      const g = this.make.graphics({ add: false });
-      const w = Math.max(...puffs.map(([x, , rad]) => x + rad)) + 10;
-      for (const [x, y, rad] of puffs) g.fillStyle(0xcfe6fb, 1).fillCircle(x * r, (y + 8) * r, rad * r);
-      g.fillRoundedRect(30 * r, 66 * r, (w - 50) * r, 30 * r, 15 * r);
-      g.fillStyle(0xffffff, 1);
-      for (const [x, y, rad] of puffs) g.fillCircle(x * r, y * r, rad * r);
-      g.fillRoundedRect(30 * r, 58 * r, (w - 50) * r, 30 * r, 15 * r);
-      g.generateTexture(`cloud${i}`, Math.ceil(w * r), Math.ceil(110 * r));
-      g.destroy();
-    });
-  }
-
-  update(_time, delta) {
-    const { width } = this.scale;
-    for (const c of this.clouds) {
-      c.x += (c.speed * delta) / 1000;
-      if (c.x - c.displayWidth / 2 > width) c.x = -c.displayWidth / 2;
-    }
+    this.wash.setTexture('title-wash').setDisplaySize(w, h);
   }
 
   // ---------- top bar, logo, best ----------
@@ -282,18 +211,27 @@ export default class TitleScene extends Phaser.Scene {
     }
   }
 
-  drawBest(x, y, s, gap) {
+  // "Best: Level 23" pill. `extra` (optional, e.g. level chips) sits beside it on the same row.
+  drawBest(x, y, s, gap, extra = null) {
     if (!(this.save_.bestLevel > 0)) return y;
     const font = Math.max(16, 26 * s);
     const ph = font * 1.55;
-    const best = makeText(this, x, y + ph / 2, `Best: Level ${this.save_.bestLevel}`, {
+    const best = makeText(this, 0, 0, `Best: Level ${this.save_.bestLevel}`, {
       fontFamily: FONT_TITLE, fontSize: px(font), color: '#ffffff', stroke: '#1E3A8A', strokeThickness: Math.max(4, 6 * s),
     }).setOrigin(0.5);
-    const pill = this.add.graphics();
     const w = best.width + font * 1.5;
-    pill.fillStyle(0x1e3a8a, 0.28).fillRoundedRect(x - w / 2, y, w, ph, ph / 2);
+    const rowH = Math.max(ph, extra?.rowH ?? 0);
+    const total = w + (extra ? gap + extra.rowW : 0);
+    const px0 = x - total / 2 + w / 2;
+    best.setPosition(px0, y + rowH / 2);
+    const pill = this.add.graphics();
+    pill.fillStyle(0x1e3a8a, 0.28).fillRoundedRect(px0 - w / 2, y + rowH / 2 - ph / 2, w, ph, ph / 2);
     this.root.add([pill, best]);
-    return y + ph + gap * 0.5;
+    if (extra) {
+      extra.setPosition(x + total / 2 - extra.rowW / 2, y + rowH / 2);
+      this.root.add(extra);
+    }
+    return y + rowH + gap * 0.5;
   }
 
   // ---------- starter cards ----------
@@ -474,17 +412,27 @@ export default class TitleScene extends Phaser.Scene {
   }
 
   drawButtonsRow(cx, y, bs, maxW) {
+    const gap = 14 * bs;
     if (this.save_.run) {
-      const gap = 40 * bs;
-      const w = Math.min(300, (maxW / bs - 40) / 2);
+      const w = Math.min(300, (maxW / bs - 2 * 14) / 3);
+      const off = w * bs + gap;
+      const cont = this.continueButton(cx - off, y, bs, w, 72);
+      this.root.add(cont);
+      this.root.add(makeButton(this, cx, y, 'START', 'main', () => this.openDialog('confirm'), {
+        scale: bs, width: w, height: 72, fontSize: 34,
+      }));
+      this.root.add(makeButton(this, cx + off, y, 'DAILY', 'secondary', () => this.startDailyRun(), {
+        scale: bs, width: w, height: 72, fontSize: 30,
+      }));
+      return cont;
+    } else {
+      const w = Math.min(320, (maxW / bs - gap / bs) / 2);
       const off = (w * bs + gap) / 2;
-      this.root.add(this.continueButton(cx - off, y, bs, w));
-      this.root.add(makeButton(this, cx + off, y, 'START', 'main', () => this.openDialog('confirm'), {
+      this.root.add(makeButton(this, cx - off, y, 'START', 'main', () => this.startRun(), {
         scale: bs, width: w, height: 84, fontSize: 40,
       }));
-    } else {
-      this.root.add(makeButton(this, cx, y, 'START', 'main', () => this.startRun(), {
-        scale: bs, width: 320, height: 84, fontSize: 42,
+      this.root.add(makeButton(this, cx + off, y, 'DAILY TRAIL', 'secondary', () => this.startDailyRun(), {
+        scale: bs, width: w, height: 84, fontSize: 28,
       }));
     }
   }
@@ -492,35 +440,74 @@ export default class TitleScene extends Phaser.Scene {
   // Full-width stacked buttons at the bottom (portrait). Returns the block's top y.
   drawButtonsStack(cx, bottom, width, bs, gap) {
     const h = 72;
-    const block = (h + 8) * bs;
+    const count = this.save_.run ? 3 : 2;
+    const block = count * (h + 8) * bs;
     const w = width / bs;
-    const startY = bottom - block + (h * bs) / 2;
+    const startY = bottom - (h + 8) * bs + (h * bs) / 2;
     if (this.save_.run) {
-      const contY = startY - block - gap * 0.6;
-      this.root.add(this.continueButton(cx, contY, bs, w, h));
-      this.root.add(makeButton(this, cx, startY, 'START', 'main', () => this.openDialog('confirm'), {
+      const unit = (h + 8) * bs;
+      const contY = startY - 2 * unit;
+      const cont = this.continueButton(cx, contY, bs, w, h);
+      this.root.add(cont);
+      this.root.add(makeButton(this, cx, startY - unit, 'START', 'main', () => this.openDialog('confirm'), {
         scale: bs, width: w, height: h, fontSize: 38,
       }));
-      return contY - (h * bs) / 2;
+      this.root.add(makeButton(this, cx, startY, 'DAILY TRAIL', 'secondary', () => this.startDailyRun(), {
+        scale: bs, width: w, height: h, fontSize: 30,
+      }));
+      const top = contY - (h * bs) / 2;
+      return top - this.drawRunChips(cx, top - gap * 0.5, w * bs, bs) - gap * 0.5;
     }
     this.root.add(makeButton(this, cx, startY, 'START', 'main', () => this.startRun(), {
       scale: bs, width: w, height: h, fontSize: 38,
     }));
-    return startY - (h * bs) / 2;
+    this.root.add(makeButton(this, cx, startY - (h + 8) * bs, 'DAILY TRAIL', 'secondary', () => this.startDailyRun(), {
+      scale: bs, width: w, height: h, fontSize: 30,
+    }));
+    return startY - (h + 8) * bs - (h * bs) / 2;
   }
 
-  startRun() {
+  // Chips for every level cleared this run (PRD 4.8), bottom edge at `bottom`. Tap one for its
+  // power and best. Returns the height used (0 if nothing cleared yet).
+  drawRunChips(cx, bottom, width, bs) {
+    const chips = this.runChips(width, Math.max(0.8, bs));
+    if (!chips) return 0;
+    chips.setPosition(cx, bottom - chips.rowH / 2);
+    this.root.add(chips);
+    return chips.rowH;
+  }
+
+  runChips(width, s) {
+    const results = this.save_.run?.results ?? [];
+    if (!results.length) return null;
+    return makeLevelChips(this, results, width, s, (e, chip) => {
+      const m = chip.getWorldTransformMatrix();
+      showChipInfo(this, m.tx, m.ty, levelChipLines(e, this.save_.bestByLevel?.[e.level], (k) => STARTERS[k]?.label ?? k), s);
+    });
+  }
+
+  startRun(runSeed = newRunSeed()) {
     const run = {
       starter: this.selected,
-      runSeed: newRunSeed(),
+      runSeed,
       level: 1,
       hearts: LEVEL_TUNING.lives,
       stars: 0,
       history: [],
+      results: [],
     };
     this.save_.run = run;
     save(this.save_);
     this.scene.start('LevelScene', { run });
+  }
+
+  startDailyRun() {
+    const seed = dailyRunSeed();
+    if (this.save_.run) {
+      this.openDialog('daily-confirm', true, seed);
+      return;
+    }
+    this.startRun(seed);
   }
 
   continueRun() {
@@ -529,19 +516,36 @@ export default class TitleScene extends Phaser.Scene {
 
   // ---------- dialogs (rebuilt on resize) ----------
 
-  openDialog(kind, animate = true) {
+  openDialog(kind, animate = true, seed = this.dialogSeed) {
     if (this.dialog && this.dialogKind === kind && animate) return;
     this.dialogKind = kind;
+    this.dialogSeed = seed;
     const settings = this.save_.settings;
     const spec = kind === 'settings'
       ? {
         title: 'Settings',
         width: 500,
         toggles: [
+          { label: 'Mute all sound', get: () => settings.muted ?? true, set: (on) => {
+            settings.muted = on; setSoundMuted(on); save(this.save_);
+          } },
+          { label: 'Sound effects', get: () => settings.soundEffects ?? true, set: (on) => {
+            settings.soundEffects = on; setSoundEffectsEnabled(on); save(this.save_);
+          } },
           { label: 'Hint mode', get: () => settings.hint, set: (on) => { settings.hint = on; save(this.save_); } },
           { label: 'Reduce motion', get: () => settings.reduceMotion, set: (on) => { settings.reduceMotion = on; save(this.save_); } },
         ],
         buttons: [{ label: 'Done', colour: 'main', onClick: (close) => close() }],
+      }
+      : kind === 'daily-confirm'
+      ? {
+        title: 'Play today’s Daily Trail?',
+        message: `Your Level ${this.save_.run.level} run will be replaced. Today’s seed is ${seed}.`,
+        width: 560,
+        buttons: [
+          { label: 'Cancel', colour: 'secondary', onClick: (close) => close() },
+          { label: 'Daily Trail', colour: 'main', onClick: () => this.startRun(seed) },
+        ],
       }
       : {
         title: 'Start a new run?',
@@ -554,7 +558,7 @@ export default class TitleScene extends Phaser.Scene {
       };
     this.dialog = makeDialog(this, spec, {
       animate,
-      onClose: () => { this.dialogKind = null; this.dialog = null; },
+      onClose: () => { this.dialogKind = null; this.dialog = null; this.dialogSeed = null; },
     });
   }
 }

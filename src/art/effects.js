@@ -56,11 +56,11 @@ const TEX = {
 const img = (scene, key, x, y, depth = 60) => scene.add.image(x, y, key).setScale(1 / RES).setDepth(depth);
 
 // A few soft dust puffs where the player lands.
-export function dustPuff(scene, x, y, reduce) {
+export function dustPuff(scene, x, y, reduce, count = 3) {
   if (reduce) return;
   const key = TEX.dust(scene);
-  for (let i = 0; i < 3; i++) {
-    const p = img(scene, key, x + (i - 1) * 12, y - 2, 9).setAlpha(0.9).setScale(0.4 / RES);
+  for (let i = 0; i < count; i++) {
+    const p = img(scene, key, x + (count > 1 ? (i - 1) * 12 : 0), y - 2, 9).setAlpha(count > 1 ? 0.9 : 0.6).setScale(0.4 / RES);
     scene.tweens.add({
       targets: p, x: p.x + (i - 1) * 16, y: y - 8 - Math.random() * 6, scale: 0.9 / RES, alpha: 0,
       duration: 380, ease: 'Quad.Out', onComplete: () => p.destroy(),
@@ -169,25 +169,110 @@ export function shake(scene, reduce, intensity = 0.006) {
   if (!reduce) scene.cameras.main.shake(160, intensity);
 }
 
-// Small hop arcs from (x0,y0) to (x1,y1). Calls onLand(x, y) after each hop. Returns total ms.
-export function hopTo(scene, target, x1, y1, { onLand, maxMs = 420 } = {}) {
-  const x0 = target.x;
-  const y0 = target.y;
-  const dist = Math.hypot(x1 - x0, y1 - y0);
-  const hops = Phaser.Math.Clamp(Math.round(dist / 110), 1, 5);
-  const each = Math.min(140, maxMs / hops);
-  const height = Math.min(26, 10 + dist / hops / 8);
-  for (let i = 0; i < hops; i++) {
-    const ax = x0 + ((x1 - x0) * i) / hops;
-    const ay = y0 + ((y1 - y0) * i) / hops;
-    const bx = x0 + ((x1 - x0) * (i + 1)) / hops;
-    const by = y0 + ((y1 - y0) * (i + 1)) / hops;
+// Run in straight lines through `points` (usually just [from, to]; via the stairs when changing
+// zone). Speed scales with distance and the whole move, little hop at the end included, is capped
+// at maxMs. Small bounces and dust puffs while running. Calls onTurn(dx) when the direction
+// changes and onStep(x, y) every frame. Returns total ms.
+export function runTo(scene, target, points, { onTurn, onStep, reduce, maxMs = 700 } = {}) {
+  const pts = points.filter((p, i) => i === 0 || Math.hypot(p.x - points[i - 1].x, p.y - points[i - 1].y) > 0.5);
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  const total = cum[cum.length - 1];
+  if (total < 1) return 0;
+  const hopMs = 150;
+  const runMs = Math.round(Math.min(maxMs - hopMs, 120 + total * 0.38));
+  let seg = 1;
+  let lastDust = 0;
+  const at = (s) => {
+    while (seg < pts.length - 1 && cum[seg] < s) seg++;
+    const a = pts[seg - 1];
+    const b = pts[seg];
+    const t = (s - cum[seg - 1]) / Math.max(1e-6, cum[seg] - cum[seg - 1]);
+    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, dx: b.x - a.x, seg };
+  };
+  let facing = 0;
+  const o = { t: 0 };
+  scene.tweens.add({
+    targets: o, t: 1, duration: runMs, ease: 'Sine.InOut',
+    onUpdate: (tw) => {
+      const p = at(o.t * total);
+      if (facing !== p.seg && Math.abs(p.dx) > 3) { facing = p.seg; onTurn?.(p.dx); }
+      const elapsed = tw.elapsed;
+      const bounce = Math.abs(Math.sin(elapsed / 55)) * 4; // quick little running bounces
+      target.setPosition(p.x, p.y - bounce);
+      onStep?.(p.x, p.y);
+      if (elapsed - lastDust > 90) {
+        lastDust = elapsed;
+        dustPuff(scene, p.x, p.y + 2, reduce, 1);
+      }
+    },
+    onComplete: () => {
+      const end = pts[pts.length - 1];
+      const h = { t: 0 };
+      scene.tweens.add({
+        targets: h, t: 1, duration: hopMs, ease: 'Linear',
+        onUpdate: () => target.setPosition(end.x, end.y - Math.sin(h.t * Math.PI) * 14),
+        onComplete: () => {
+          target.setPosition(end.x, end.y);
+          dustPuff(scene, end.x, end.y + 2, reduce);
+        },
+      });
+    },
+  });
+  return runMs + hopMs;
+}
+
+// Confetti burst: drawn rectangles in party colours, spray up then flutter down.
+// Works in world space (LevelScene) and screen space (UIScene). Returns the pieces' max life in ms.
+const CONFETTI = [0xef4444, 0xfacc15, 0x22c55e, 0x3b82f6, 0xa855f7, 0xf97316, 0xec4899];
+export function confetti(scene, x, y, reduce, { count = 60, spread = 260, rise = 260, fall = 420, depth = 70, scale = 1 } = {}) {
+  if (reduce) return 0;
+  for (let i = 0; i < count; i++) {
+    const w = (6 + Math.random() * 6) * scale;
+    const h = (10 + Math.random() * 8) * scale;
+    const p = scene.add.rectangle(x, y, w, h, CONFETTI[i % CONFETTI.length]).setDepth(depth).setAngle(Math.random() * 360);
+    const vx = (Math.random() - 0.5) * 2 * spread;
+    const vy = -rise * (0.5 + Math.random() * 0.8);
+    const life = 1100 + Math.random() * 700;
     const o = { t: 0 };
+    const spin = (Math.random() - 0.5) * 900;
+    const wob = Math.random() * Math.PI * 2;
     scene.tweens.add({
-      targets: o, t: 1, duration: each, delay: i * each,
-      onUpdate: () => target.setPosition(ax + (bx - ax) * o.t, ay + (by - ay) * o.t - Math.sin(o.t * Math.PI) * height),
-      onComplete: () => onLand?.(bx, by),
+      targets: o, t: 1, duration: life, delay: Math.random() * 120,
+      onUpdate: () => {
+        const t = o.t;
+        p.setPosition(x + vx * t + Math.sin(wob + t * 12) * 10 * scale, y + vy * t * 1.6 + fall * 1.6 * t * t);
+        p.setAngle(p.angle + spin / 60).setScale(Math.abs(Math.cos(wob + t * 9)) * 0.7 + 0.3, 1);
+        p.setAlpha(t > 0.75 ? (1 - t) / 0.25 : 1);
+      },
+      onComplete: () => p.destroy(),
     });
   }
-  return hops * each;
+  return 1900;
+}
+
+// Gold glow running up a flight of stairs (a gate just fell). x, top..bottom in world px.
+export function lightStairs(scene, x, top, bottom, width, reduce) {
+  const g = scene.add.graphics().setDepth(3).setBlendMode(Phaser.BlendModes.ADD);
+  const h = bottom - top;
+  for (let i = 3; i >= 1; i--) g.fillStyle(0xfde68a, 0.12 * i).fillRoundedRect(x - width / 2 - i * 8, top - i * 6, width + i * 16, h + i * 12, 14);
+  g.setAlpha(0);
+  scene.tweens.chain({
+    targets: g,
+    tweens: [
+      { alpha: 1, duration: 260, ease: 'Quad.Out' },
+      { alpha: 0.45, duration: 500, yoyo: true, repeat: 1, ease: 'Sine.InOut' },
+      { alpha: 0.35, duration: 300 },
+    ],
+  });
+  if (!reduce) {
+    const key = TEX.spark(scene);
+    for (let i = 0; i < 10; i++) {
+      const p = img(scene, key, x + (Math.random() - 0.5) * width, bottom - Math.random() * 20, 45).setTint(0xfde047).setScale(0.6 / RES);
+      scene.tweens.add({
+        targets: p, y: top - 30, alpha: 0, duration: 700 + Math.random() * 400, delay: i * 60, ease: 'Quad.Out', onComplete: () => p.destroy(),
+      });
+    }
+  }
+  return g;
 }

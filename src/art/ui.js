@@ -3,6 +3,7 @@
 // from getScreen(). Every number shown goes through formatPower. Every tappable
 // thing has at least a 44x44px hit area.
 import Phaser from 'phaser';
+import { playSound } from '../audio.js';
 import { formatPower } from '../../shared/rules.js';
 import { RES, getScreen, safeRect } from '../layout/screen.js';
 
@@ -135,6 +136,7 @@ export function makeButton(scene, x, y, label, colour, onClick, opts = {}) {
   btn.on('pointerup', () => {
     if (!pressed) return;
     press(false);
+    playSound('tap');
     onClick?.();
   });
 
@@ -311,7 +313,7 @@ export function makeToggle(scene, x, y, on, onChange, s = 1) {
 }
 
 // Modal dialog, centred in the safe area: dark shade + cream panel.
-// spec: { title, stars?, message?, toggles?: [{ label, get(), set(on) }], buttons: [{ label, colour, onClick }], width }
+// spec: { title, stars?, message?, rows?: [{ build }], toggles?: [{ label, get(), set(on) }], buttons: [{ label, colour, onClick }], width }
 // Max 92% of the screen width; buttons stack vertically when the panel is under 420px.
 // Returns { root, close } — root is a container holding everything (depth 100).
 export function makeDialog(scene, spec, { animate = true, onClose } = {}) {
@@ -353,6 +355,14 @@ export function makeDialog(scene, spec, { animate = true, onClose } = {}) {
     y += msg.height + gap;
   }
 
+  // Custom rows: build(scene, innerWidth, s, animate) returns a game object with rowH (its height).
+  for (const row of spec.rows ?? []) {
+    const obj = row.build(scene, inner, s, animate);
+    if (!obj) continue;
+    items.push([obj, y + obj.rowH / 2]);
+    y += obj.rowH + gap;
+  }
+
   for (const t of spec.toggles ?? []) {
     const rowH = Math.max(MIN_HIT, 56 * s);
     const toggle = makeToggle(scene, 0, 0, t.get(), (on) => t.set(on), Math.max(0.8, s));
@@ -366,7 +376,7 @@ export function makeDialog(scene, spec, { animate = true, onClose } = {}) {
   }
   y += gap * 0.5;
 
-  const stacked = pw < 420;
+  const stacked = pw < 420 || (spec.stackButtons && spec.buttons.length > 2);
   const btns = spec.buttons;
   const bs = Math.max(0.8, s);
   const bh = 64; // design units
@@ -403,10 +413,78 @@ export function makeDialog(scene, spec, { animate = true, onClose } = {}) {
     panel.add(obj);
   }
   root.add(panel);
+  // Short screens (a phone on its side): shrink the whole panel to fit the safe area's height.
+  const fit = Math.min(1, (area.height - 8) / ph);
+  panel.setScale(fit);
 
   if (animate) {
-    panel.setScale(0.85).setAlpha(0);
-    scene.tweens.add({ targets: panel, scale: 1, alpha: 1, duration: 220, ease: 'Back.Out' });
+    panel.setScale(fit * 0.85).setAlpha(0);
+    scene.tweens.add({ targets: panel, scale: fit, alpha: 1, duration: 220, ease: 'Back.Out' });
   }
   return { root, panel, close };
+}
+
+// Row of level chips: "L3" with up to 3 small stars each (PRD 4.8). entries: [{ level, stars }].
+// Shows the most recent ones that fit in maxW. onTap(entry, chip) gets the chip's world position.
+// Returns a container with rowH and rowW.
+export function makeLevelChips(scene, entries, maxW, s, onTap) {
+  const c = scene.add.container(0, 0);
+  const cw = Math.max(MIN_HIT, 58 * s);
+  const ch = Math.max(MIN_HIT, 50 * s);
+  const gap = Math.max(4, 6 * s);
+  const fit = Math.max(1, Math.floor((maxW + gap) / (cw + gap)));
+  const shown = entries.slice(-fit);
+  const rowW = shown.length * cw + (shown.length - 1) * gap;
+  shown.forEach((e, i) => {
+    const x = -rowW / 2 + cw / 2 + i * (cw + gap);
+    const g = scene.add.graphics();
+    g.fillStyle(0x1e3a8a, 0.18).fillRoundedRect(-cw / 2, -ch / 2 + 3, cw, ch, 12 * s);
+    g.fillStyle(0xffffff, 0.95).fillRoundedRect(-cw / 2, -ch / 2, cw, ch, 12 * s);
+    g.lineStyle(2, 0xe6cfa6, 1).strokeRoundedRect(-cw / 2, -ch / 2, cw, ch, 12 * s);
+    const t = makeText(scene, 0, -ch * 0.18, `L${e.level}`, { fontFamily: FONT_TITLE, fontSize: px(Math.max(13, 17 * s)), color: INK }).setOrigin(0.5);
+    const st = scene.add.graphics();
+    const ss = Math.max(9, 12 * s);
+    for (let k = 0; k < 3; k++) drawStar(st, (k - 1) * ss * 1.15, ch * 0.22, ss, k < (e.stars ?? 0));
+    const chip = scene.add.container(x, 0, [g, t, st]);
+    makeTappable(chip, cw, ch);
+    chip.on('pointerup', () => onTap?.(e, chip));
+    c.add(chip);
+  });
+  Object.assign(c, { rowH: ch, rowW });
+  return c;
+}
+
+// Small info bubble above a point (screen space). Closes on the next tap anywhere or after 3.5s.
+export function showChipInfo(scene, x, y, lines, s = 1) {
+  scene.chipInfo?.destroy();
+  const t = makeText(scene, 0, 0, lines.join('\n'), {
+    fontStyle: '800', fontSize: px(Math.max(14, 17 * s)), color: INK, align: 'center', lineSpacing: 4,
+  }).setOrigin(0.5);
+  const w = t.width + 28 * s;
+  const h = t.height + 22 * s;
+  const scr = getScreen(scene);
+  const cx = Math.min(Math.max(x, w / 2 + 8), scr.w - w / 2 - 8);
+  const cy = Math.max(h / 2 + 8, y - h / 2 - 34 * s);
+  const panel = makePanel(scene, cx, cy, w, h, { scale: Math.min(1, s), radius: 14 });
+  panel.add(t);
+  panel.setDepth(130).setScale(0.85).setAlpha(0);
+  scene.tweens.add({ targets: panel, scale: 1, alpha: 1, duration: 160, ease: 'Back.Out' });
+  scene.chipInfo = panel;
+  const close = () => {
+    if (scene.chipInfo === panel) scene.chipInfo = null;
+    panel.destroy();
+  };
+  scene.time.delayedCall(80, () => scene.input.once('pointerdown', close));
+  scene.time.delayedCall(3500, close);
+  return panel;
+}
+
+// What a level chip's bubble says. e: { level, stars, power, best } from run.results;
+// rec: the all-time bestByLevel record for that level (or null).
+export function levelChipLines(e, rec, starterName = (k) => k) {
+  const stars = (n) => '★'.repeat(n) + '☆'.repeat(3 - n);
+  const lines = [`Level ${e.level}  ${stars(e.stars ?? 0)}`];
+  if (e.power != null) lines.push(`Power ${e.power.toLocaleString('en-US')} · Best possible ${e.best.toLocaleString('en-US')}`);
+  if (rec) lines.push(`Best ever: ${stars(rec.stars)} ${rec.power.toLocaleString('en-US')} (${starterName(rec.starter)})`);
+  return lines;
 }

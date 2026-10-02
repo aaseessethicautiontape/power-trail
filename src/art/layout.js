@@ -8,11 +8,11 @@ import { hashSeed, makeRng } from '../../shared/rng.js';
 export const MODES = {
   wide: {
     W: 1280, zoneH: 560, gap: 150, pw: [800, 900], offset: [120, 170], cliff: [30, 40], n: [2.6, 3.2],
-    connW: 96, bottomPad: 180, topPad: 70, bossH: 260, perExtraStop: 30,
+    connW: 96, bottomPad: 180, topPad: 70, bossH: 260, perExtraStop: 30, bend: [0.1, 0.22],
   },
   tall: {
     W: 760, zoneH: 640, gap: 150, pw: [560, 610], offset: [36, 56], cliff: [28, 36], n: [2.6, 3.2],
-    connW: 86, bottomPad: 180, topPad: 70, bossH: 260, perExtraStop: 80,
+    connW: 86, bottomPad: 180, topPad: 70, bossH: 260, perExtraStop: 120, bend: [0.04, 0.1],
   },
 };
 
@@ -92,35 +92,6 @@ function underPlateau(plateaus, pt, pad) {
 
 // ---------- paths ----------
 
-// Order stops entry -> ... -> exit: nearest neighbour, then 2-opt to remove crossings.
-function orderStops(entry, stops, exit) {
-  const left = [...stops];
-  const order = [];
-  let cur = entry;
-  while (left.length) {
-    let bi = 0;
-    for (let i = 1; i < left.length; i++) if (dist(cur, left[i]) < dist(cur, left[bi])) bi = i;
-    cur = left.splice(bi, 1)[0];
-    order.push(cur);
-  }
-  const route = [entry, ...order, exit];
-  const len = (r) => r.reduce((s, p, i) => (i ? s + dist(r[i - 1], p) : 0), 0);
-  let improved = true;
-  while (improved) {
-    improved = false;
-    for (let i = 1; i < route.length - 2; i++) {
-      for (let j = i + 1; j < route.length - 1; j++) {
-        const next = [...route.slice(0, i), ...route.slice(i, j + 1).reverse(), ...route.slice(j + 1)];
-        if (len(next) < len(route) - 0.5) {
-          route.splice(0, route.length, ...next);
-          improved = true;
-        }
-      }
-    }
-  }
-  return route;
-}
-
 // Catmull-Rom through the points, sampled every ~8px.
 function smooth(points) {
   const out = [];
@@ -154,6 +125,60 @@ function clampInside(p, pt, margin) {
 function nearPath(paths, pt, r) {
   for (const path of paths) for (const q of path.pts) if (Math.abs(q.x - pt.x) < r && Math.abs(q.y - pt.y) < r && dist(q, pt) < r) return true;
   return false;
+}
+
+// ---------- open ground: a decorative trail, worn patches, free running ----------
+
+export const TRAIL_HALF = 24; // trail half-width as drawn
+export const RUN_EDGE = 60; // the player runs anywhere at least this far inside a plateau's edge
+export const TRAIL_CLEAR = 70; // stops (and their art) keep this far from the trail's edge
+// Worn patch under each stop's shadow, and the art's rough footprint above the stop point.
+const PATCH = {
+  wild: { rx: 50, ry: 18, body: { dy: -52, r: 44 } },
+  item: { rx: 46, ry: 16, body: { dy: -30, r: 36 } },
+  egg: { rx: 48, ry: 17, body: { dy: -44, r: 38 } },
+};
+// Placement tries the strict rules first, then relaxes them a step at a time.
+const RELAX = [
+  { gap: STOP_GAP, clear: TRAIL_CLEAR, sides: true },
+  { gap: STOP_GAP, clear: TRAIL_CLEAR },
+  { gap: STOP_GAP, clear: 45, warn: '45px from the trail' },
+  { gap: STOP_GAP, clear: 30, warn: '30px from the trail' },
+  { gap: 125, clear: 30, warn: 'spaced 125px' },
+  { gap: 110, clear: 50, warn: 'spaced 110px, 50px from the trail' },
+  { gap: 100, clear: 30, warn: 'spaced 100px, 30px from the trail' },
+];
+
+// The trail: entrance to stairs, with one gentle bend, kept inside the plateau.
+function makeTrail(rng, p, entry, exit, M) {
+  const dx = exit.x - entry.x;
+  const dy = exit.y - entry.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const bend = rng.range(M.bend[0], M.bend[1]) * len * (rng.chance(0.5) ? 1 : -1);
+  const t = rng.range(0.42, 0.58);
+  const mid = clampInside(p, { x: entry.x + dx * t + (-dy / len) * bend, y: entry.y + dy * t + (dx / len) * bend }, 110);
+  const pts = smooth([entry, mid, exit]);
+  return pts.map((q, k) => (k === 0 || k === pts.length - 1 ? q : clampInside(p, q, 40)));
+}
+
+function nearestOn(pts, pt) {
+  let bi = 0;
+  let bd = Infinity;
+  for (let k = 0; k < pts.length; k++) {
+    const d = dist(pts[k], pt);
+    if (d < bd) { bd = d; bi = k; }
+  }
+  const a = pts[Math.max(0, bi - 1)];
+  const b = pts[Math.min(pts.length - 1, bi + 1)];
+  return { k: bi, d: bd, side: Math.sign((b.x - a.x) * (pt.y - pts[bi].y) - (b.y - a.y) * (pt.x - pts[bi].x)) || 1 };
+}
+
+// Is this spot clear of the trail (the stop's art too)? Returns its side of the trail, or 0.
+function trailFit(trail, c, patch, clear) {
+  const n = nearestOn(trail, c);
+  if (n.d < TRAIL_HALF + patch.rx * 0.6 + clear) return 0;
+  if (nearestOn(trail, { x: c.x, y: c.y + patch.body.dy }).d < TRAIL_HALF + patch.body.r + clear * 0.6) return 0;
+  return n.side;
 }
 
 // ---------- main ----------
@@ -238,76 +263,91 @@ export function buildLayout(level, mode = 'wide') {
   const pl = plateaus[nz - 1];
   const boss = { x: pl.cx, y: edgeY(pl, pl.cx, -1) + 140 };
 
-  // Stops: best-candidate sampling inside each plateau, at least STOP_GAP apart.
+  // Plateaus are open ground (PRD 7.1): the player runs straight to any stop. The only trail is a
+  // short decorative one from the entrance to the stairs up; stops keep well away from it and
+  // spread around the plateau on both sides, so nothing suggests an order.
   const stops = {};
   const paths = [];
+  const patches = [];
   const warnings = [];
   for (let i = 0; i < nz; i++) {
     const p = plateaus[i];
     const zone = level.zones[i];
     if (zone.gate) stops[zone.gate.id] = { ...connectors[i - 1].gate };
     const entry = i === 0 ? start : connectors[i - 1].gate;
-    const exit = i === nz - 1 ? boss : connectors[i].A;
-    const fixed = [{ pt: entry, d: STOP_GAP }, { pt: exit, d: i === nz - 1 ? STOP_GAP + 50 : 110 }];
-    if (i === nz - 1) fixed.push({ pt: boss, d: STOP_GAP + 50 });
+    const exit = i === nz - 1 ? { x: boss.x, y: boss.y + 34 } : connectors[i].A;
+    const trail = makeTrail(rng, p, entry, exit, M);
+    paths.push({ zone: i, kind: 'trail', pts: trail });
 
+    const fixed = [{ pt: entry, d: STOP_GAP }, { pt: exit, d: i === nz - 1 ? STOP_GAP + 50 : 120 }];
+    if (i === nz - 1) fixed.push({ pt: boss, d: STOP_GAP + 50 });
     const cands = [];
-    for (let y = p.cy - p.ry; y <= p.cy + p.ry; y += 14) {
-      for (let x = p.cx - p.rx; x <= p.cx + p.rx; x += 14) {
+    for (let y = p.cy - p.ry; y <= p.cy + p.ry; y += 12) {
+      for (let x = p.cx - p.rx; x <= p.cx + p.rx; x += 12) {
         const pt = { x, y };
         if (insidePlateau(p, pt, EDGE) && fixed.every((f) => dist(f.pt, pt) >= f.d)) cands.push(pt);
       }
     }
     const placed = [];
+    const sides = { [-1]: 0, 1: 0 };
     for (const stop of zone.stops) {
-      let gapNeeded = STOP_GAP;
+      const patch = PATCH[stop.kind];
+      // Balance both sides of the trail so the stops read as "pick one".
+      const want = sides[-1] === sides[1] ? (rng.chance(0.5) ? -1 : 1) : sides[-1] < sides[1] ? -1 : 1;
       let best = null;
-      while (!best && gapNeeded >= 100) {
-        const ok = cands.filter((c) => placed.every((q) => dist(q, c) >= gapNeeded));
-        if (ok.length) {
-          let bestScore = -1;
-          for (let k = 0; k < 40; k++) {
-            const c = ok[Math.floor(rng.next() * ok.length)];
-            const score = Math.min(...placed.map((q) => dist(q, c)), ...fixed.map((f) => dist(f.pt, c) - f.d + STOP_GAP), 9999)
-              + rng.range(0, 40); // a little randomness so layouts don't all look the same
-            if (score > bestScore) { bestScore = score; best = c; }
-          }
-        } else {
-          gapNeeded -= 10;
+      for (const relax of RELAX) {
+        const ok = [];
+        for (const c of cands) {
+          if (!placed.every((q) => dist(q, c) >= relax.gap)) continue;
+          const side = trailFit(trail, c, patch, relax.clear);
+          if (!side || (relax.sides && side !== want)) continue;
+          ok.push({ c, side });
         }
+        if (!ok.length) continue;
+        let bestScore = -Infinity;
+        for (let k = 0; k < 50; k++) {
+          const o = ok[Math.floor(rng.next() * ok.length)];
+          const score = Math.min(...placed.map((q) => dist(q, o.c)), ...fixed.map((f) => dist(f.pt, o.c) - f.d + STOP_GAP), 9999)
+            + rng.range(0, 40); // a little randomness so layouts don't all look the same
+          if (score > bestScore) { bestScore = score; best = o; }
+        }
+        if (relax.warn) warnings.push(`zone ${i + 1}: stop ${stop.id} ${relax.warn}`);
+        break;
       }
       if (!best) throw new Error(`layout: no room for stop ${stop.id} in zone ${i + 1}`);
-      if (gapNeeded < STOP_GAP) warnings.push(`zone ${i + 1}: stop ${stop.id} spaced ${gapNeeded}px`);
-      placed.push(best);
-      stops[stop.id] = { x: best.x, y: best.y };
+      sides[best.side] += 1;
+      placed.push(best.c);
+      stops[stop.id] = { x: best.c.x, y: best.c.y };
+      patches.push({ id: stop.id, zone: i, x: best.c.x, y: best.c.y + 2, rx: patch.rx, ry: patch.ry, side: best.side });
     }
-
-    const route = orderStops(entry, placed, exit);
-    const pts = smooth(route).map((q) => clampInside(p, q, 34));
-    paths.push({ zone: i, kind: 'plateau', pts });
   }
   stops[level.boss.id] = { ...boss };
 
-  // Walkways down each connector (stairs and bridge are drawn on top of these).
+  // Walkways up each flight of stairs (stairs and bridge are drawn on top of these).
   for (const c of connectors) {
     const pts = [];
     for (let y = c.A.y; y >= c.gate.y; y -= 8) pts.push({ x: c.x, y });
-    paths.push({ zone: c.to, kind: 'walk', pts });
+    paths.push({ zone: c.to, from: c.from, kind: 'walk', pts });
   }
 
   // ---------- decor ----------
   // Each decor piece is checked by the circles it actually covers on screen (a tree's
   // canopy sits ~60px above its trunk), so canopies never hide a path, stop or water.
   const decor = [];
-  const spots = [start, ...connectors.map((c) => c.gate), ...Object.values(stops)];
+  const spots = [start, ...connectors.flatMap((c) => [c.gate, c.A]), ...Object.values(stops)];
   const water = (c) => rivers.some((r) => Math.abs(c.y - r.y) < r.half + 14 + c.r)
     || ponds.some((o) => ((c.x - o.x) / (o.rx + 10 + c.r)) ** 2 + ((c.y - o.y) / (o.ry + 10 + c.r)) ** 2 < 1);
+  const onPatch = (c, pad) => patches.some((o) => ((c.x - o.x) / (o.rx + pad + c.r)) ** 2 + ((c.y - o.y) / (o.ry + pad + c.r)) ** 2 < 1);
+  // Decor stays at the plateau edges, outside the open ground the player runs across.
+  const inRunZone = (c) => plateaus.some((p) => insidePlateau(p, c, RUN_EDGE - c.r));
   const onConnector = (c) => connectors.some((k) => Math.abs(c.x - k.x) < k.width / 2 + 12 + c.r
     && c.y > k.gate.y - c.r && c.y < k.A.y + c.r);
   const clearOf = (type, pt, scale) => bodyCircles(type, pt.x, pt.y, scale).every((c) =>
     spots.every((sp) => dist(sp, c) > c.r + 48)
     && dist(boss, c) > c.r + 125
     && !nearPath(paths, c, c.r + 24)
+    && !onPatch(c, 16)
+    && !inRunZone(c)
     && !onConnector(c)
     && !water(c)
     && decor.every((d) => dist(d, pt) > (d.size + SIZE[type] * scale) * 0.55));
@@ -352,7 +392,7 @@ export function buildLayout(level, mode = 'wide') {
   decor.sort((a, b) => a.y - b.y);
 
   return {
-    mode, W, H, seed: level.seed, plateaus, connectors, rivers, ponds, paths, stops, start, boss, decor, warnings,
+    mode, W, H, seed: level.seed, plateaus, connectors, rivers, ponds, paths, patches, stops, start, boss, decor, warnings,
   };
 }
 
@@ -380,7 +420,7 @@ export function checkLayout(level, L) {
   for (const d of L.decor) {
     for (const c of bodyCircles(d.type, d.x, d.y, d.scale)) {
       for (const id of ids) if (dist(c, L.stops[id]) < c.r + 30) problems.push(`${d.type} decor covers stop ${id}`);
-      if (nearPath(L.paths, c, c.r + 18)) problems.push(`${d.type} decor covers the path at ${Math.round(d.x)},${Math.round(d.y)}`);
+      if (nearPath(L.paths, c, c.r + 18)) problems.push(`${d.type} decor covers the trail at ${Math.round(d.x)},${Math.round(d.y)}`);
       if (L.rivers.some((r) => Math.abs(c.y - r.y) < r.half + c.r)
         || L.ponds.some((o) => ((c.x - o.x) / (o.rx + c.r)) ** 2 + ((c.y - o.y) / (o.ry + c.r)) ** 2 < 1)) {
         problems.push(`${d.type} decor covers water at ${Math.round(d.x)},${Math.round(d.y)}`);
@@ -388,9 +428,26 @@ export function checkLayout(level, L) {
     }
   }
   for (const path of L.paths) {
-    if (path.kind !== 'plateau') continue;
+    if (path.kind !== 'trail') continue;
     const p = L.plateaus[path.zone];
-    if (path.pts.some((q) => !insidePlateau(p, q, 20))) problems.push(`path in zone ${path.zone + 1} leaves its plateau`);
+    if (path.pts.slice(1, -1).some((q) => !insidePlateau(p, q, 20))) problems.push(`trail in zone ${path.zone + 1} leaves its plateau`);
+  }
+  // Open ground: every stop keeps clear of the trail, and no decor sits where the player runs.
+  for (const path of L.paths) {
+    if (path.kind !== 'trail') continue;
+    for (const pa of L.patches.filter((x) => x.zone === path.zone)) {
+      if (nearestOn(path.pts, pa).d < TRAIL_HALF + pa.rx * 0.6 + 30) problems.push(`stop ${pa.id} is on the trail`);
+    }
+  }
+  for (const d of L.decor) {
+    for (const c of bodyCircles(d.type, d.x, d.y, d.scale)) {
+      if (L.patches.some((o) => ((c.x - o.x) / (o.rx + c.r)) ** 2 + ((c.y - o.y) / (o.ry + c.r)) ** 2 < 1)) {
+        problems.push(`${d.type} decor covers a stop's patch at ${Math.round(d.x)},${Math.round(d.y)}`);
+      }
+      if (L.plateaus.some((p) => insidePlateau(p, c, RUN_EDGE - c.r))) {
+        problems.push(`${d.type} decor stands in the open ground at ${Math.round(d.x)},${Math.round(d.y)}`);
+      }
+    }
   }
   return problems;
 }

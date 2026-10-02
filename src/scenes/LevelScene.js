@@ -1,23 +1,25 @@
 import Phaser from 'phaser';
 import dex from '../../shared/dex.json';
-import { generateLevel } from '../../shared/level.js';
+import { generateLevel, formFor } from '../../shared/level.js';
 import { STARTERS, LEVEL_TUNING } from '../../shared/config.js';
 import { allStops, isAvailable, canBeat, playLevel, starsFor } from '../../shared/rules.js';
-import { load, save, clearRun } from '../save.js';
-import { dustPuff, popSparkles, typeAttack, flashWhite, floatNumber, shake, hopTo } from '../art/effects.js';
+import { load, save, recordBest } from '../save.js';
+import { difficultyFor } from '../../shared/difficulty.js';
+import { popSparkles, typeAttack, flashWhite, floatNumber, shake, runTo, confetti, lightStairs } from '../art/effects.js';
 import { loadPokemon, loadItems } from '../assets.js';
-import { buildLayout } from '../art/layout.js';
+import { buildLayout, insidePlateau, RUN_EDGE } from '../art/layout.js';
 import { renderMap } from '../art/biomeRenderer.js';
 import { paletteFor } from '../art/palettes.js';
 import { makePokemonStop, makeItemStop, makeEggStop, makePlayer, lockTexture, MIN_BADGE_PX } from '../art/stops.js';
 import { getScreen, watchResize, RES } from '../layout/screen.js';
+import { playSound, setSoundMuted, setSoundEffectsEnabled } from '../audio.js';
 
 const TAP_SLOP = 10; // px of movement before a press becomes a drag
 const HOLD_MS = 500; // hold this long on a Pokémon for its info card
 const ZOOM_MIN = 0.8; // x the default (fit-width) zoom
 const ZOOM_MAX = 2;
 const byId = new Map(dex.map((p) => [p.id, p]));
-const STAND_OFF = { wild: 78, gate: 96, boss: 130, item: 62, egg: 62 }; // how far from a stop the player lands
+const STAND_OFF = { wild: 125, gate: 95, boss: 165, item: 100, egg: 100 }; // centre to centre: about a 70px gap in front of the stop
 
 // The level map (PRD 6.4). HUD, banners and the info card live in UIScene so camera zoom never shrinks them.
 // Flow: build map art -> load this level's images (UIScene shows a loading overlay) -> build stops ->
@@ -33,6 +35,17 @@ export default class LevelScene extends Phaser.Scene {
       this.scene.start('TitleScene');
       return;
     }
+    // Evolution plays before the level intro when this level brings a new form (PRD 6.3, 6.8).
+    const formId = formFor(this.run.starter, this.run.level);
+    if (this.run.form == null) this.run.form = formId; // older saves: start tracking from here
+    if (this.run.form !== formId) {
+      this.scene.start('EvolutionScene', { run: this.run, from: this.run.form, to: formId });
+      return;
+    }
+    this.run.beaten ??= 0;
+    this.run.newDex ??= 0;
+    this.run.results ??= []; // [{ level, stars, faints, power, best }] per cleared level (PRD 4.7)
+    this.run.faints ??= 0; // faints on the current level so far
     this.settings = load().settings;
     this.debugN = 0;
     this.levelNum = this.run.level;
@@ -73,12 +86,16 @@ export default class LevelScene extends Phaser.Scene {
 
   // Generates the level, draws the map, then loads its images and places the stops.
   startLevel() {
-    this.level = generateLevel({ dex, level: this.levelNum, starter: this.run.starter, runSeed: this.seed });
+    // Difficulty follows scores (PRD 4.7). Fixed for the whole level: results only change on a clear.
+    const difficulty = this.debug ? 0 : difficultyFor(this.run.results);
+    this.level = generateLevel({ dex, level: this.levelNum, starter: this.run.starter, runSeed: this.seed, difficulty });
     this.open = 1; // zones open (zone 1 is open at the start)
     this.taken = new Set();
     this.clicks = []; // stop ids tapped this attempt, in order (saved for the server to replay)
     this.lastStop = null; // where the player is standing
     this.busy = false;
+    this.ended = null; // 'fainted' | 'cleared' once the attempt is over
+    this.pz = 0; // where the player is: zone index, or k + 0.5 on the stairs above zone k
     this.power = this.level.startPower;
     this.playable = false;
     this.ready = false;
@@ -94,6 +111,13 @@ export default class LevelScene extends Phaser.Scene {
   // Called by UIScene when the intro banner has finished.
   onIntroDone() {
     this.playable = true;
+    // Level 1, first time ever: a hand points at the weakest Pokémon you can reach (PRD 6.4).
+    if (this.levelNum === 1 && !this.debug && !load().tutorialDone) {
+      const weakest = [...this.stops.values()]
+        .filter((c) => c.stop.pokemon && isAvailable(this.level, c.stop, this.open, this.taken))
+        .sort((a, b) => a.stop.power - b.stop.power)[0];
+      if (weakest) this.scene.get('UIScene').showTutorial?.(weakest);
+    }
   }
 
   // Only this level's images: the player's form, every Pokémon stop, item art.
@@ -184,6 +208,7 @@ export default class LevelScene extends Phaser.Scene {
     this.player = makePlayer(this, level.form, spot, this.power, p0.cx < spot.x);
     for (let z = this.open; z < level.zones.length; z++) this.fog.push(this.makeFog(z));
     this.updateBadgeScale();
+    this.refreshReach();
   }
 
   // ---------- locked zones: desaturating veil + soft fog clouds ----------
@@ -293,13 +318,20 @@ export default class LevelScene extends Phaser.Scene {
   }
 
   // Keeps the camera inside the world; when the world is smaller than the view, centre it.
+  // The HUD covers the top and bottom of the screen, so the bounds reach past the map by that
+  // much: the boss at the very top can always be scrolled clear of the power pill and level name.
   updateBounds() {
+    if (!this.L) return;
     const cam = this.cameras.main;
+    const ins = this.scene.get('UIScene')?.hudInsets ?? { top: 0, bottom: 0 };
+    const top = ins.top / cam.zoom;
+    const bottom = ins.bottom / cam.zoom;
     const dw = cam.width / cam.zoom;
     const dh = cam.height / cam.zoom;
+    const H = this.L.H + top + bottom;
     const bx = this.L.W < dw ? (this.L.W - dw) / 2 : 0;
-    const by = this.L.H < dh ? (this.L.H - dh) / 2 : 0;
-    cam.setBounds(bx, by, Math.max(this.L.W, dw), Math.max(this.L.H, dh));
+    const by = (H < dh ? (H - dh) / 2 : 0) - top;
+    cam.setBounds(bx, by, Math.max(this.L.W, dw), Math.max(H, dh));
   }
 
   // Zoom about a screen point, so whatever is under the finger/cursor stays put.
@@ -469,9 +501,13 @@ export default class LevelScene extends Phaser.Scene {
   }
 
   onTap(p) {
-    if (!this.playable || this.busy) return;
+    if (!this.playable || this.busy || this.ended) return;
+    this.scene.get('UIScene').hideTutorial?.(); // the first-time hand goes away after the first tap
     const c = this.hitTest(p);
-    if (!c || !c.stop) return;
+    if (!c || !c.stop) {
+      this.runToGround(p);
+      return;
+    }
     // Every decision goes through shared/rules.js.
     if (!isAvailable(this.level, c.stop, this.open, this.taken)) {
       this.showLocked(c);
@@ -483,32 +519,31 @@ export default class LevelScene extends Phaser.Scene {
   // ---------- gameplay ----------
 
   // Where the player stands: next to the last stop it took (in this layout), or the start.
+  // Where the player stands: in front of the last stop it took (it stays where it fought), or the start.
   playerSpot() {
     if (!this.lastStop) return this.L.start;
     const { id, kind } = this.lastStop;
     const pos = this.L.stops[id];
-    const from = this.L.start;
-    const d = Math.hypot(from.x - pos.x, from.y - pos.y) || 1;
-    return { x: pos.x + ((from.x - pos.x) / d) * STAND_OFF[kind] * 0.4, y: pos.y + 6 };
+    if (kind === 'gate') return { x: pos.x, y: pos.y + STAND_OFF.gate };
+    const p = this.L.plateaus[Math.round(this.pz)] ?? this.L.plateaus[0];
+    const dx = p.cx - pos.x;
+    const dy = p.cy + p.ry - pos.y;
+    const d = Math.hypot(dx, dy) || 1;
+    return { x: pos.x + (dx / d) * STAND_OFF[kind], y: pos.y + (dy / d) * STAND_OFF[kind] + 4 };
   }
 
   takeStop(c) {
     const stop = c.stop;
+    playSound('tap');
+    playSound('hop');
     this.busy = true;
     this.clicks.push(stop.id);
     const pl = this.player;
-    // Land next to the stop, on the side we're coming from.
-    const dx = pl.x - c.x;
-    const dy = pl.y - c.y;
-    const d = Math.hypot(dx, dy) || 1;
-    const off = Math.min(STAND_OFF[stop.kind], d);
-    const tx = c.x + (dx / d) * off;
-    const ty = c.y + (dy / d) * off + 4;
-    // Face the way we're hopping (HOME art faces left).
-    if (Math.abs(tx - pl.x) > 4) pl.art.setFlipX(tx > pl.x);
-    pl.setDepth(10 + ty / 10000 + 0.00001);
-    const ms = hopTo(this, pl, tx, ty, { onLand: (x, y) => dustPuff(this, x, y + 2, this.reduce()) });
-    this.followPlayer(tx, ty);
+    // Run straight across the open ground (via the stairs if it's another zone), stop in front, face it.
+    const tz = this.zoneOf(stop);
+    const pts = this.waypoints({ x: pl.x, y: pl.y }, tz, { x: c.x, y: c.y }, STAND_OFF[stop.kind]);
+    const ms = this.runPlayer(pts);
+    this.pz = tz;
     this.time.delayedCall(ms + 20, () => {
       if (!this.sys.isActive()) return;
       // Face the stop for the battle.
@@ -523,13 +558,85 @@ export default class LevelScene extends Phaser.Scene {
     return !!this.settings?.reduceMotion;
   }
 
+  // ---------- free movement (PRD 6.4, 7.1) ----------
+
+  // Zone of a stop for running: gates stand at the top of the stairs above zone (gate.zone - 1).
+  zoneOf(stop) {
+    return stop.kind === 'gate' ? stop.zone - 0.5 : stop.zone;
+  }
+
+  // Straight-line legs from `from` (in zone this.pz) to `to` (in zone tz): through the bottom and
+  // top of each flight of stairs in between, then straight on, stopping `standOff` px short.
+  waypoints(from, tz, to, standOff) {
+    const pts = [from];
+    const C = this.L.connectors;
+    let z = this.pz;
+    while (z !== tz) {
+      if (tz > z) {
+        if (Number.isInteger(z)) { pts.push(C[z].A); z += 0.5; } else { pts.push(C[z - 0.5].gate); z += 0.5; }
+      } else if (Number.isInteger(z)) { pts.push(C[z - 1].gate); z -= 0.5; } else { pts.push(C[z - 0.5].A); z -= 0.5; }
+    }
+    const last = pts[pts.length - 1];
+    const d = Math.hypot(to.x - last.x, to.y - last.y);
+    if (d > standOff + 2) {
+      const k = (d - standOff) / d;
+      pts.push({ x: last.x + (to.x - last.x) * k, y: last.y + (to.y - last.y) * k + (standOff ? 4 : 0) });
+    }
+    return pts;
+  }
+
+  // Runs the player along straight legs, keeps depth sorted, and faces the direction of travel.
+  runPlayer(pts) {
+    const pl = this.player;
+    const end = pts[pts.length - 1];
+    const ms = runTo(this, pl, pts, {
+      reduce: this.reduce(),
+      maxMs: 700,
+      onTurn: (dx) => pl.art.setFlipX(dx > 0), // HOME art faces left
+      onStep: (x, y) => pl.setDepth(10 + y / 10000 + 0.00001),
+    });
+    this.followPlayer(end.x, end.y, ms);
+    return ms;
+  }
+
+  // Tap on empty ground in an open zone: just run there (it never changes the rules).
+  runToGround(p) {
+    const w = this.cameras.main.getWorldPoint(p.x, p.y);
+    const z = this.L.plateaus.findIndex((pl, i) => i < this.open && insidePlateau(pl, w, RUN_EDGE));
+    if (z < 0) return;
+    const pts = this.waypoints({ x: this.player.x, y: this.player.y }, z, { x: w.x, y: w.y }, 0);
+    this.busy = true;
+    const ms = this.runPlayer(pts);
+    this.pz = z;
+    this.time.delayedCall(ms, () => { this.busy = false; });
+  }
+
+  // A soft pulsing ring at the feet of every stop you can reach right now (locked ones get none).
+  refreshReach() {
+    if (!this.stops) return;
+    for (const c of this.stops.values()) {
+      const reach = isAvailable(this.level, c.stop, this.open, this.taken) && !this.lockedLook(c.stop);
+      if (reach && !c.reach) {
+        const w = c.stop.kind === 'boss' ? 190 : c.stop.kind === 'gate' ? 130 : 100;
+        const ring = this.add.ellipse(0, 4, w, w * 0.34).setStrokeStyle(3, 0xfff7c2, 0.9).setFillStyle(0xfff7c2, 0.16);
+        c.addAt(ring, 0);
+        c.reach = ring;
+        this.tweens.add({ targets: ring, scaleX: 1.12, scaleY: 1.12, alpha: 0.45, duration: 900, yoyo: true, repeat: -1, ease: 'Sine.InOut' });
+      } else if (!reach && c.reach) {
+        this.tweens.killTweensOf(c.reach);
+        c.reach.destroy();
+        c.reach = null;
+      }
+    }
+  }
+
   // Keep the player comfortably on screen.
-  followPlayer(x, y) {
+  followPlayer(x, y, ms = 450) {
     const v = this.cameras.main.worldView;
     const mx = v.width * 0.22;
     const my = v.height * 0.22;
     if (x < v.x + mx || x > v.right - mx || y < v.y + my || y > v.bottom - my) {
-      this.cameras.main.pan(x, y - 60, 450, 'Sine.easeInOut');
+      this.cameras.main.pan(x, y - 60, Math.max(450, ms), 'Sine.easeInOut');
     }
   }
 
@@ -540,6 +647,7 @@ export default class LevelScene extends Phaser.Scene {
     const bodyY = c.y + c.hit.dy;
     const lx = (c.x - pl.x) * 0.45;
     const ly = (c.y - pl.y) * 0.45;
+    playSound('hit');
     if (win) {
       this.tweens.add({ targets: pl, x: pl.x + lx, y: pl.y + ly, duration: 110, yoyo: true, ease: 'Quad.Out' });
       this.time.delayedCall(100, () => {
@@ -571,11 +679,16 @@ export default class LevelScene extends Phaser.Scene {
     this.lastStop = { id: stop.id, kind: stop.kind };
     this.stops.delete(stop.id);
     this.addToDex(stop.pokemon.id);
+    this.run.beaten += 1;
     const bodyY = c.y + c.hit.dy;
+    playSound('pop');
+    if (stop.kind === 'boss') this.ended = 'cleared'; // no more taps: the panel is coming
     this.tweens.add({
       targets: c, scaleX: 1.35, scaleY: 0.55, duration: 110, ease: 'Quad.In',
       onComplete: () => {
         popSparkles(this, c.x, bodyY, this.reduce(), { count: 14 });
+        // The boss pops into confetti (PRD 6.6).
+        if (stop.kind === 'boss') confetti(this, c.x, bodyY, this.reduce(), { count: 70, spread: 300, rise: 320, fall: 380, depth: 70 });
         this.tweens.killTweensOf([c, ...c.list, ...c.badgeGroup.list]);
         c.destroy();
       },
@@ -590,6 +703,7 @@ export default class LevelScene extends Phaser.Scene {
 
   collectItem(c) {
     const stop = c.stop;
+    playSound('item');
     this.taken.add(stop.id);
     this.lastStop = { id: stop.id, kind: stop.kind };
     this.stops.delete(stop.id);
@@ -609,18 +723,40 @@ export default class LevelScene extends Phaser.Scene {
 
   collectEgg(c) {
     const stop = c.stop;
+    playSound('egg');
     this.taken.add(stop.id);
     this.lastStop = { id: stop.id, kind: stop.kind };
     this.stops.delete(stop.id);
     // Egg cracks open, gold sparkle burst, purple ×2, power doubles with a bigger bounce.
+    this.tweens.killTweensOf(c.art);
     this.tweens.add({ targets: c.art, angle: { from: -12, to: 12 }, duration: 60, yoyo: true, repeat: 2 });
     this.time.delayedCall(260, () => {
-      popSparkles(this, c.x, c.y - 40, this.reduce(), { count: 18, tint: 0xfacc15, spread: 90 });
+      this.crackEgg(c);
+      popSparkles(this, c.x, c.y - 40, this.reduce(), { count: 22, tint: 0xfacc15, spread: 100 });
+      popSparkles(this, c.x, c.y - 40, this.reduce(), { count: 8, tint: 0xffffff, spread: 60 });
       this.tweens.killTweensOf([c, ...c.list, ...c.badgeGroup.list]);
       c.destroy();
       floatNumber(this, c.x, c.y - 80, stop.mult, 'egg', '×', this.player.badgeGroup.scaleX * 1.3);
       this.countPower(this.power * stop.mult, null, 1.45);
     });
+  }
+
+  // The egg splits into two halves that tip apart and fade.
+  crackEgg(c) {
+    const art = c.art;
+    if (!art.texture || !art.frame) return;
+    const wx = c.x + art.x;
+    const wy = c.y + art.y;
+    const fw = art.frame.width;
+    const fh = art.frame.height;
+    for (const side of [-1, 1]) {
+      const half = this.add.image(wx, wy, art.texture.key).setOrigin(0.5, 1).setScale(art.scaleX, art.scaleY).setDepth(c.depth + 0.001);
+      half.setCrop(side < 0 ? 0 : fw / 2, 0, fw / 2, fh);
+      this.tweens.add({
+        targets: half, x: wx + side * 26, y: wy + 6, angle: side * 35, alpha: 0, duration: 520, ease: 'Quad.Out',
+        onComplete: () => half.destroy(),
+      });
+    }
   }
 
   // Power counts up (max 600ms) with a bounce; the next tap is accepted when it's done.
@@ -655,21 +791,57 @@ export default class LevelScene extends Phaser.Scene {
 
   // Hint mode: beatable enemies get a green badge.
   refreshHints() {
-    if (!this.settings?.hint || !this.stops) return;
+    if (!this.stops) return;
+    const hint = !!this.settings?.hint;
     for (const c of this.stops.values()) {
-      if (c.stop.pokemon) c.badge.setColour(canBeat(this.power, c.stop.power) ? 'item' : 'enemy');
+      if (c.stop.pokemon) c.badge.setColour(hint && canBeat(this.power, c.stop.power) ? 'item' : 'enemy');
     }
+  }
+
+  // Pause menu switches (PRD 6.10). Saved straight away and applied live.
+  setSetting(key, on) {
+    this.settings[key] = on;
+    if (key === 'muted') setSoundMuted(on);
+    if (key === 'soundEffects') setSoundEffectsEnabled(on);
+    const data = load();
+    data.settings[key] = on;
+    save(data);
+    if (key === 'hint') this.refreshHints();
+  }
+
+  // Restart level from the pause menu: costs no heart, the attempt is saved as incomplete.
+  restartLevel() {
+    if (this.ended) return;
+    if (this.clicks.length) {
+      this.recordAttempt();
+      this.saveRun();
+    }
+    this.scene.restart({ run: this.run });
+  }
+
+  canRestart() {
+    return !this.ended && !this.debug;
   }
 
   openZone(z) {
     this.open = z + 1;
     this.unlockZone(z);
+    // The stairs into the new zone light up and the camera drifts up to show it.
+    const conn = this.L.connectors[z - 1];
+    if (conn) lightStairs(this, conn.x, conn.top, conn.cliffBottom + 8, conn.width, this.reduce());
+    const p = this.L.plateaus[z];
+    const cam = this.cameras.main;
+    const v = cam.worldView;
+    const tx = Phaser.Math.Linear(cam.midPoint.x, p.cx, 0.35);
+    const ty = Math.max(p.cy, cam.midPoint.y - v.height * 0.3);
+    cam.pan(tx, ty, 700, 'Sine.easeInOut');
     // Brighten everything that's now in reach, and clear the fog round the next gate.
     for (const c of this.stops.values()) {
       if (this.lockedLook(c.stop)) continue;
       c.art.clearTint?.();
       c.badgeGroup.setAlpha(1);
     }
+    this.refreshReach();
     const next = this.fog.find((f) => f.zone === this.open);
     if (next) {
       this.destroyFog(next);
@@ -683,6 +855,7 @@ export default class LevelScene extends Phaser.Scene {
     if (!data.dex.includes(id)) {
       data.dex.push(id);
       save(data);
+      this.run.newDex += 1;
     }
   }
 
@@ -691,7 +864,7 @@ export default class LevelScene extends Phaser.Scene {
     if (this.debug) return;
     const run = this.run;
     let entry = run.history.find((h) => h.level === this.level.level);
-    if (!entry) run.history.push((entry = { level: this.level.level, attempts: [] }));
+    if (!entry) run.history.push((entry = { level: this.level.level, difficulty: this.level.difficulty ?? 0, attempts: [] }));
     entry.attempts.push([...this.clicks]);
   }
 
@@ -702,49 +875,125 @@ export default class LevelScene extends Phaser.Scene {
     save(data);
   }
 
+  async verifyFinishedRun() {
+    try {
+      const response = await fetch('/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ starter: this.run.starter, runSeed: this.run.runSeed, history: this.run.history }),
+      });
+      const result = await response.json();
+      if (response.ok && result.verified === true) return { verified: true, label: '✅ Verified', result };
+      return { verified: false, label: typeof result.reason === 'string' && result.reason ? result.reason : 'Not verified' };
+    } catch {
+      return { verified: false, label: 'Not verified' };
+    }
+  }
+
   faint() {
     const ui = this.scene.get('UIScene');
     const pl = this.player;
+    playSound('faint');
+    this.ended = 'fainted';
     // Tip over.
     this.tweens.add({ targets: pl.art, angle: pl.art.flipX ? 80 : -80, y: pl.art.y - 6, duration: 260, ease: 'Quad.In' });
     this.tweens.killTweensOf(pl.badgeGroup);
     this.recordAttempt();
+    if (!this.debug) this.run.faints += 1;
     this.run.hearts = Math.max(0, this.run.hearts - 1);
-    if (this.run.hearts === 0 && !this.debug) {
+    const over = this.run.hearts === 0;
+    if (over && !this.debug) {
+      // Out of hearts: the run is over. Best level and stars are kept (PRD 6.7); so are the dex,
+      // bestByLevel and settings.
       const data = load();
-      data.run = null; // out of hearts: the run is over
+      const cleared = this.run.level - 1;
+      if (cleared > data.bestLevel || (cleared === data.bestLevel && this.run.stars > data.bestStars)) {
+        data.bestLevel = cleared;
+        data.bestStars = this.run.stars;
+      }
+      data.run = null;
       save(data);
     } else {
       this.saveRun();
     }
+    const data = load();
     ui.faintSequence?.(this.run.hearts, {
       retry: () => this.scene.restart({ run: this.run }),
       quit: () => this.scene.start('TitleScene'),
-      newRun: () => { clearRun(); this.scene.start('TitleScene'); },
+      newRun: () => this.scene.start('TitleScene'),
+      dex: () => this.scene.start('DexScene'),
+      // Game over summary (PRD 6.7).
+      summary: {
+        level: this.level.level,
+        stars: this.run.stars,
+        results: this.run.results,
+        verification: over ? this.verifyFinishedRun() : null,
+        run: { starter: this.run.starter, runSeed: this.run.runSeed, history: this.run.history },
+        bestByLevel: data.bestByLevel,
+        beaten: this.run.beaten,
+        newDex: this.run.newDex,
+        dexTotal: data.dex.length,
+      },
     });
   }
 
-  // Minimal level-clear (the full 6.6 panel comes later): check the run, save, then Next level.
+  // Level clear (PRD 6.6): check the taps with shared/rules.js, auto-save, then the panel.
   levelCleared(powerBeforeBoss) {
+    playSound('clear');
     const result = playLevel(this.level, this.clicks);
     const stars = starsFor(this.level, powerBeforeBoss);
     this.recordAttempt();
     const lv = this.level.level;
+    let heart = false;
+    let score = null;
     if (!this.debug && result.outcome === 'cleared') {
       const run = this.run;
       run.stars += stars;
       run.level = lv + 1;
-      if (lv % LEVEL_TUNING.heartEvery === 0) run.hearts = Math.min(LEVEL_TUNING.lives, run.hearts + 1);
+      // Every 5th level cleared gives +1 heart, max 3 (PRD 2.10).
+      if (lv % LEVEL_TUNING.heartEvery === 0 && run.hearts < LEVEL_TUNING.lives) {
+        run.hearts += 1;
+        heart = true;
+      }
       const data = load();
       data.run = run;
-      if (lv > data.bestLevel) { data.bestLevel = lv; data.bestStars = run.stars; }
+      if (lv > data.bestLevel || (lv === data.bestLevel && run.stars > data.bestStars)) {
+        data.bestLevel = lv;
+        data.bestStars = run.stars;
+      }
+      run.results.push({ level: lv, stars, faints: run.faints, power: powerBeforeBoss, best: this.level.best });
+      run.faints = 0;
+      data.run = run;
+      score = recordBest(data, lv, { stars, power: powerBeforeBoss, best: this.level.best, starter: run.starter });
       save(data);
+      this.prefetchNext();
     }
     this.scene.get('UIScene').clearedPanel?.({
-      level: lv, stars, power: powerBeforeBoss, best: this.level.solution.beforeBoss, verified: result.outcome === 'cleared',
-      next: () => this.scene.restart({ run: this.run }),
-      quit: () => this.scene.start('TitleScene'),
+      level: lv, stars, power: powerBeforeBoss, best: this.level.best, heart, hearts: this.run.hearts,
+      prev: score?.prev ?? null, newBest: !!score?.newBest && !!score?.prev,
+      difficulty: this.level.difficulty ?? 0,
+      verified: result.outcome === 'cleared',
+      next: () => this.nextLevel(),
+      map: () => {},
     });
+  }
+
+  // While the clear panel is up, start loading the next level's images (and the next form,
+  // so the evolution scene has it too). Textures are global, so the next scene finds them cached.
+  prefetchNext() {
+    const next = generateLevel({
+      dex, level: this.run.level, starter: this.run.starter, runSeed: this.run.runSeed, difficulty: difficultyFor(this.run.results),
+    });
+    const stops = allStops(next);
+    this.loadToken = (this.loadToken ?? 0) + 1; // any earlier level load is done by now
+    loadPokemon(this, [this.run.form, next.form.id, ...stops.filter((s) => s.pokemon).map((s) => s.pokemon.id)]);
+    loadItems(this, stops.filter((s) => s.sprite).map((s) => s.sprite));
+    this.load.start();
+  }
+
+  // Next level: LevelScene.create plays the evolution first if formFor gives a new form.
+  nextLevel() {
+    this.scene.restart({ run: this.run });
   }
 
   // Locked stop: a small shake and a lock icon, nothing else (PRD 6.4).

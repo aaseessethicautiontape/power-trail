@@ -1,0 +1,3 @@
+# Never deploy credentials (PRD 11): on Vercel the service account lives in FIREBASE_SERVICE_ACCOUNT.
+power-trail-firebase-adminsdk-fbsvc-f90507968c.json
+.env*.local
