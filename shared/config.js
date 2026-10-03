@@ -40,9 +40,9 @@ export const LEVEL_TUNING = {
   zones: (level) => Math.min(4, 3 + Math.floor((level - 1) / 10)), // 3 zones, 4 from level 11
   stopsPerZone: (level) => [3, Math.min(5, 4 + Math.floor(level / 12))], // min, max (gate not counted)
   // Wild Pokémon power as a share of your best power when the zone opens.
-  wildShare: { first: [0.15, 0.3], normal: [0.1, 0.4], trap: [1.05, 1.3], trapChance: 0.7 },
-  gateShare: (level) => Math.min(0.78, 0.6 + 0.008 * (level - 1)), // gate power vs best power before it
-  bossShare: (level) => Math.min(0.95, 0.84 + 0.005 * (level - 1)), // boss power vs best possible
+  wildShare: { first: [0.2, 0.38], normal: [0.14, 0.48], trap: [1.15, 1.55], trapChance: 0.85 },
+  gateShare: (level) => Math.min(0.86, 0.72 + 0.005 * (level - 1)), // gate power vs best power before it
+  bossShare: (level) => Math.min(0.95, 0.88 + 0.005 * (level - 1)), // boss power vs best possible
   maxGen: (level) => Math.min(9, 1 + Math.floor((level - 1) / 4)), // new generation every 4 levels
   tierCenter: (level) => Math.min(600, 290 + 12 * (level - 1)), // which Pokémon show up: weak early, strong later
   legendEvery: 10, // every 10th level the boss is a legendary or mythical

@@ -2,11 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { generateLevel } from '../shared/level.js';
-import { playLevel } from '../shared/rules.js';
+import { playLevel, allStops } from '../shared/rules.js';
 import { STARTER_KEYS } from '../shared/config.js';
-import { difficultyFor, DIFFICULTY_MIN, DIFFICULTY_MAX } from '../shared/difficulty.js';
+import { difficultyFor, applyDifficulty, DIFFICULTY_MIN, DIFFICULTY_MAX } from '../shared/difficulty.js';
 
 const dex = JSON.parse(readFileSync(new URL('../shared/dex.json', import.meta.url)));
 const r = (level, stars, faints = 0) => ({ level, stars, faints });
@@ -46,19 +45,30 @@ test('difficultyFor: never outside -2 to +2', () => {
   }
 });
 
-test('difficulty 0 builds exactly the same levels as before', () => {
-  // Hashes of generateLevel's output taken before difficulty existed.
-  const snapshots = [
-    ['pikachu', 'demo', 1, 'd5da0b6fc986214f'],
-    ['charmander', 'trail10', 8, 'f5dcca2f54171e22'],
-    ['bulbasaur', 'abc12345', 20, '6060739291201d17'],
-    ['squirtle', 'zz99', 37, '15747e041e741136'],
-  ];
-  for (const [starter, runSeed, level, hash] of snapshots) {
+test('difficulty 0 leaves the level exactly as the generator built it', () => {
+  // Independent of the tuning numbers, so LEVEL_TUNING can change without touching this test:
+  // difficulty 0 (or none) must return the generator's own level, untouched.
+  for (const [starter, runSeed, level] of [['pikachu', 'demo', 1], ['charmander', 'trail10', 8], ['bulbasaur', 'abc12345', 20], ['squirtle', 'zz99', 37]]) {
     const plain = generateLevel({ dex, level, starter, runSeed });
     const zero = generateLevel({ dex, level, starter, runSeed, difficulty: 0 });
     assert.deepEqual(zero, plain);
-    assert.equal(createHash('sha256').update(JSON.stringify(zero)).digest('hex').slice(0, 16), hash, `${starter} ${runSeed} L${level}`);
+    assert.equal(zero.difficulty, undefined, 'difficulty 0 must not mark or alter the level');
+    assert.equal(applyDifficulty(plain, 0), plain, 'applyDifficulty(level, 0) returns the same object');
+    assert.deepEqual(generateLevel({ dex, level, starter, runSeed }), plain, 'same inputs, same level');
+  }
+});
+
+test('every difficulty plays the same map: same Pokémon and items, only the numbers move', () => {
+  for (const starter of STARTER_KEYS) {
+    for (const level of [1, 5, 12, 33]) {
+      const ids = (lv) => allStops(lv).map((s) => `${s.id}:${s.pokemon?.id ?? s.sprite ?? s.kind}`).join(',');
+      const base = generateLevel({ dex, level, starter, runSeed: 'samemap' });
+      for (let d = DIFFICULTY_MIN; d <= DIFFICULTY_MAX; d++) {
+        const lv = generateLevel({ dex, level, starter, runSeed: 'samemap', difficulty: d });
+        assert.equal(ids(lv), ids(base), `${starter} L${level} d${d} changed the map`);
+        assert.equal(lv.startPower, base.startPower);
+      }
+    }
   }
 });
 
