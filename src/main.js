@@ -6,6 +6,7 @@ import LevelScene from './scenes/LevelScene.js';
 import UIScene from './scenes/UIScene.js';
 import EvolutionScene from './scenes/EvolutionScene.js';
 import DexScene from './scenes/DexScene.js';
+import TrailMapScene from './scenes/TrailMapScene.js';
 import { load } from './save.js';
 import { setSoundMuted, setSoundEffectsEnabled, unlockAudio } from './audio.js';
 
@@ -17,7 +18,7 @@ const config = {
   backgroundColor: '#8EC9FF',
   scale: { mode: Phaser.Scale.RESIZE, width: '100%', height: '100%' },
   input: { activePointers: 2 }, // pinch zoom needs two pointers
-  scene: [BootScene, TitleBgScene, TitleScene, LevelScene, UIScene, EvolutionScene, DexScene],
+  scene: [BootScene, TitleBgScene, TitleScene, TrailMapScene, LevelScene, UIScene, EvolutionScene, DexScene],
 };
 
 // Text drawn before the font arrives would bake in the fallback font, so wait for it.

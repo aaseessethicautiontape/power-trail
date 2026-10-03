@@ -147,7 +147,7 @@ export default class UIScene extends Phaser.Scene {
     this.scene.get('LevelScene')?.updateBounds?.();
     if (this.nextShown) {
       const bs = Math.max(0.8, s);
-      const next = makeButton(this, 0, 0, 'Next level', 'main', () => this.clearInfo.next(), { scale: bs, width: 240, height: 64, fontSize: 28 });
+      const next = makeButton(this, 0, 0, this.clearInfo.practice ? 'Level map' : 'Next level', 'main', () => this.clearInfo.next(), { scale: bs, width: 240, height: 64, fontSize: 28 });
       next.setPosition(scr.w / 2, area.bottom - next.btnH / 2);
       // On narrow screens keep it clear of the pause button.
       if (next.x + next.btnW / 2 > area.right - size - gap) next.x = area.right - size - gap - next.btnW / 2;
@@ -193,7 +193,7 @@ export default class UIScene extends Phaser.Scene {
 
   levelName(s) {
     const font = Math.max(16, 24 * s);
-    const t = makeText(this, 0, 0, `Level ${this.level.level} · ${this.level.biomeLabel}`, {
+    const t = makeText(this, 0, 0, `Level ${this.level.level} · ${this.level.biomeLabel}${this.run?.replay ? ' (practice)' : ''}`, {
       fontFamily: FONT_TITLE, fontSize: px(font), color: '#ffffff', stroke: '#1E3A8A', strokeThickness: Math.max(4, 6 * s),
     }).setOrigin(0.5);
     const nw = t.width + font * 1.4;
@@ -212,6 +212,7 @@ export default class UIScene extends Phaser.Scene {
     this.closeInfo();
     const buttons = [{ label: 'Resume', colour: 'main', onClick: (close) => close() }];
     if (lv.canRestart?.()) buttons.push({ label: 'Restart level', colour: 'secondary', onClick: () => lv.restartLevel() });
+    buttons.push({ label: 'Level map', colour: 'secondary', onClick: () => lv.toMap() });
     buttons.push({ label: 'Quit to title', colour: 'danger', onClick: () => lv.scene.start('TitleScene') });
     this.openDialog({
       title: 'Paused',
@@ -271,22 +272,34 @@ export default class UIScene extends Phaser.Scene {
 
   // ---------- fainting: red flash, banner, a heart cracks off, then Try again / Quit ----------
 
-  faintSequence(heartsLeft, { retry, quit, newRun, dex, summary }) {
+  faintSequence(heartsLeft, { retry, quit, newRun, dex, summary, practice, map }) {
     const scr = getScreen(this);
     const flash = this.add.rectangle(0, 0, scr.w, scr.h, 0xef4444, 0).setOrigin(0).setDepth(85);
     this.tweens.add({ targets: flash, alpha: 0.45, duration: 120, yoyo: true, hold: 60, onComplete: () => flash.destroy() });
-    this.crackHeart(heartsLeft);
+    if (!practice) this.crackHeart(heartsLeft); // practice never costs a heart
     this.showBanner('You fainted!', 0xdc2626, { hold: 800 });
     this.time.delayedCall(1350, () => {
-      if (heartsLeft > 0) {
+      if (practice) {
+        this.openDialog({
+          title: 'You fainted!',
+          message: 'This is practice, so no heart was lost. Try the level again?',
+          width: 520,
+          buttons: [
+            { label: 'Try again', colour: 'main', onClick: retry },
+            { label: 'Level map', colour: 'secondary', onClick: map },
+          ],
+        });
+      } else if (heartsLeft > 0) {
         this.openDialog({
           title: 'You fainted!',
           message: `${heartsLeft} ${heartsLeft === 1 ? 'heart' : 'hearts'} left. Try the level again from the start?`,
           width: 520,
           buttons: [
             { label: 'Try again', colour: 'main', onClick: retry },
+            { label: 'Level map', colour: 'secondary', onClick: map },
             { label: 'Quit to title', colour: 'secondary', onClick: quit },
           ],
+          stackButtons: true,
         });
       } else {
         this.gameOver(summary, { newRun, dex });
@@ -498,10 +511,10 @@ export default class UIScene extends Phaser.Scene {
 
   // Level clear (PRD 6.6): confetti, stars pop in one by one, power vs best possible,
   // "+1 heart" when earned, then Next level or Map (look around first).
-  clearedPanel({ level, stars, power, best, heart, hearts, verified, next, prev, newBest }) {
+  clearedPanel({ level, stars, power, best, heart, hearts, verified, next, prev, newBest, practice }) {
     const lv = this.scene.get('LevelScene');
     const reduce = !!lv.settings?.reduceMotion;
-    this.clearInfo = { level, stars, power, best, heart, verified, next, prev, newBest };
+    this.clearInfo = { level, stars, power, best, heart, verified, next, prev, newBest, practice };
     if (heart) this.time.delayedCall(700, () => this.gainHeart(hearts));
     this.showBanner(`Level ${level} cleared!`, 0x16a34a, { hold: 500 });
     this.time.delayedCall(900, () => {
@@ -531,8 +544,8 @@ export default class UIScene extends Phaser.Scene {
         c.verified ? null : '(this run would not pass the check)',
       ].filter(Boolean).join('\n') || null,
       buttons: [
-        { label: 'Next level', colour: 'main', onClick: () => c.next() },
-        { label: 'Map', colour: 'secondary', onClick: (close) => { close(); this.showNextButton(); } },
+        { label: c.practice ? 'Level map' : 'Next level', colour: 'main', onClick: () => c.next() },
+        { label: 'Look around', colour: 'secondary', onClick: (close) => { close(); this.showNextButton(); } },
       ],
     }, animate);
   }
@@ -877,7 +890,7 @@ export default class UIScene extends Phaser.Scene {
 }
 
 // Small round icon for each biome, drawn in code, centred on (0,0) with radius R.
-function drawBiomeIcon(g, key, R) {
+export function drawBiomeIcon(g, key, R) {
   g.fillStyle(0xffffff, 1).fillCircle(0, 0, R);
   g.fillStyle(0x000000, 0.08).fillCircle(0, R * 0.08, R * 0.92);
   g.fillStyle(0xffffff, 1).fillCircle(0, 0, R * 0.9);

@@ -172,15 +172,19 @@ export function shake(scene, reduce, intensity = 0.006) {
 // Run in straight lines through `points` (usually just [from, to]; via the stairs when changing
 // zone). Speed scales with distance and the whole move, little hop at the end included, is capped
 // at maxMs. Small bounces and dust puffs while running. Calls onTurn(dx) when the direction
-// changes and onStep(x, y) every frame. Returns total ms.
-export function runTo(scene, target, points, { onTurn, onStep, reduce, maxMs = 700 } = {}) {
+// changes and onStep(x, y) every frame. Options: dust(scene, x, y, reduce, n) draws the puffs,
+// msPerPx / bounce / bouncePeriod set the pace and the size of the running hops, onDone() fires
+// after the landing hop. Returns total ms.
+export function runTo(scene, target, points, {
+  onTurn, onStep, onDone, reduce, maxMs = 700, dust = dustPuff, hop = 14, msPerPx = 0.38, bounce = 4, bouncePeriod = 55,
+} = {}) {
   const pts = points.filter((p, i) => i === 0 || Math.hypot(p.x - points[i - 1].x, p.y - points[i - 1].y) > 0.5);
   const cum = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
   const total = cum[cum.length - 1];
   if (total < 1) return 0;
   const hopMs = 150;
-  const runMs = Math.round(Math.min(maxMs - hopMs, 120 + total * 0.38));
+  const runMs = Math.round(Math.min(maxMs - hopMs, 120 + total * msPerPx));
   let seg = 1;
   let lastDust = 0;
   const at = (s) => {
@@ -198,12 +202,12 @@ export function runTo(scene, target, points, { onTurn, onStep, reduce, maxMs = 7
       const p = at(o.t * total);
       if (facing !== p.seg && Math.abs(p.dx) > 3) { facing = p.seg; onTurn?.(p.dx); }
       const elapsed = tw.elapsed;
-      const bounce = Math.abs(Math.sin(elapsed / 55)) * 4; // quick little running bounces
-      target.setPosition(p.x, p.y - bounce);
+      const lift = Math.abs(Math.sin(elapsed / bouncePeriod)) * bounce; // quick little running bounces
+      target.setPosition(p.x, p.y - lift);
       onStep?.(p.x, p.y);
       if (elapsed - lastDust > 90) {
         lastDust = elapsed;
-        dustPuff(scene, p.x, p.y + 2, reduce, 1);
+        dust(scene, p.x, p.y + 2, reduce, 1);
       }
     },
     onComplete: () => {
@@ -211,10 +215,11 @@ export function runTo(scene, target, points, { onTurn, onStep, reduce, maxMs = 7
       const h = { t: 0 };
       scene.tweens.add({
         targets: h, t: 1, duration: hopMs, ease: 'Linear',
-        onUpdate: () => target.setPosition(end.x, end.y - Math.sin(h.t * Math.PI) * 14),
+        onUpdate: () => target.setPosition(end.x, end.y - Math.sin(h.t * Math.PI) * hop),
         onComplete: () => {
           target.setPosition(end.x, end.y);
-          dustPuff(scene, end.x, end.y + 2, reduce);
+          dust(scene, end.x, end.y + 2, reduce);
+          onDone?.();
         },
       });
     },

@@ -13,6 +13,7 @@ import { paletteFor } from '../art/palettes.js';
 import { makePokemonStop, makeItemStop, makeEggStop, makePlayer, lockTexture, MIN_BADGE_PX } from '../art/stops.js';
 import { getScreen, watchResize, RES } from '../layout/screen.js';
 import { playSound, setSoundMuted, setSoundEffectsEnabled } from '../audio.js';
+import { pushRunQuietly } from '../cloud.js';
 
 const TAP_SLOP = 10; // px of movement before a press becomes a drag
 const HOLD_MS = 500; // hold this long on a Pokémon for its info card
@@ -87,7 +88,8 @@ export default class LevelScene extends Phaser.Scene {
   // Generates the level, draws the map, then loads its images and places the stops.
   startLevel() {
     // Difficulty follows scores (PRD 4.7). Fixed for the whole level: results only change on a clear.
-    const difficulty = this.debug ? 0 : difficultyFor(this.run.results);
+    // A practice replay of a cleared level uses the difficulty that level had the first time.
+    const difficulty = this.debug ? 0 : this.run.replay ? (this.run.difficulty ?? 0) : difficultyFor(this.run.results);
     this.level = generateLevel({ dex, level: this.levelNum, starter: this.run.starter, runSeed: this.seed, difficulty });
     this.open = 1; // zones open (zone 1 is open at the start)
     this.taken = new Set();
@@ -861,7 +863,7 @@ export default class LevelScene extends Phaser.Scene {
 
   // Records this attempt's taps in the run history (the server replays them, PRD 10).
   recordAttempt() {
-    if (this.debug) return;
+    if (this.debug || this.run.replay) return;
     const run = this.run;
     let entry = run.history.find((h) => h.level === this.level.level);
     if (!entry) run.history.push((entry = { level: this.level.level, difficulty: this.level.difficulty ?? 0, attempts: [] }));
@@ -869,7 +871,7 @@ export default class LevelScene extends Phaser.Scene {
   }
 
   saveRun() {
-    if (this.debug) return;
+    if (this.debug || this.run.replay) return;
     const data = load();
     data.run = this.run;
     save(data);
@@ -899,9 +901,11 @@ export default class LevelScene extends Phaser.Scene {
     this.tweens.add({ targets: pl.art, angle: pl.art.flipX ? 80 : -80, y: pl.art.y - 6, duration: 260, ease: 'Quad.In' });
     this.tweens.killTweensOf(pl.badgeGroup);
     this.recordAttempt();
-    if (!this.debug) this.run.faints += 1;
-    this.run.hearts = Math.max(0, this.run.hearts - 1);
-    const over = this.run.hearts === 0;
+    // Practice replays never cost a heart or touch the run.
+    const practice = !!this.run.replay;
+    if (!this.debug && !practice) this.run.faints += 1;
+    if (!practice) this.run.hearts = Math.max(0, this.run.hearts - 1);
+    const over = !practice && this.run.hearts === 0;
     if (over && !this.debug) {
       // Out of hearts: the run is over. Best level and stars are kept (PRD 6.7); so are the dex,
       // bestByLevel and settings.
@@ -913,12 +917,15 @@ export default class LevelScene extends Phaser.Scene {
       }
       data.run = null;
       save(data);
-    } else {
+      pushRunQuietly(this.run); // the account's run ends too, so it can't be resumed from another device
+    } else if (!practice) {
       this.saveRun();
     }
     const data = load();
     ui.faintSequence?.(this.run.hearts, {
+      practice,
       retry: () => this.scene.restart({ run: this.run }),
+      map: () => this.toMap(),
       quit: () => this.scene.start('TitleScene'),
       newRun: () => this.scene.start('TitleScene'),
       dex: () => this.scene.start('DexScene'),
@@ -942,11 +949,11 @@ export default class LevelScene extends Phaser.Scene {
     playSound('clear');
     const result = playLevel(this.level, this.clicks);
     const stars = starsFor(this.level, powerBeforeBoss);
-    this.recordAttempt();
+    if (!this.run.replay) this.recordAttempt();
     const lv = this.level.level;
     let heart = false;
     let score = null;
-    if (!this.debug && result.outcome === 'cleared') {
+    if (!this.debug && !this.run.replay && result.outcome === 'cleared') {
       const run = this.run;
       run.stars += stars;
       run.level = lv + 1;
@@ -966,15 +973,22 @@ export default class LevelScene extends Phaser.Scene {
       data.run = run;
       score = recordBest(data, lv, { stars, power: powerBeforeBoss, best: this.level.best, starter: run.starter });
       save(data);
+      pushRunQuietly(run); // saves the run and its scores to the player's Google account, if signed in
       this.prefetchNext();
+    } else if (!this.debug && this.run.replay && result.outcome === 'cleared') {
+      // Practice: only the score you see on the map can improve. The run, hearts and stars stay as they were.
+      const data = load();
+      score = recordBest(data, lv, { stars, power: powerBeforeBoss, best: this.level.best, starter: this.run.starter });
+      save(data);
     }
     this.scene.get('UIScene').clearedPanel?.({
       level: lv, stars, power: powerBeforeBoss, best: this.level.best, heart, hearts: this.run.hearts,
       prev: score?.prev ?? null, newBest: !!score?.newBest && !!score?.prev,
       difficulty: this.level.difficulty ?? 0,
       verified: result.outcome === 'cleared',
-      next: () => this.nextLevel(),
-      map: () => {},
+      practice: !!this.run.replay,
+      // Next level: back to the level map, where your Pokémon hops up the road to the new level.
+      next: () => (this.run.replay ? this.toMap() : this.toMap({ arrive: { from: lv, to: this.run.level, stars } })),
     });
   }
 
@@ -991,9 +1005,11 @@ export default class LevelScene extends Phaser.Scene {
     this.load.start();
   }
 
-  // Next level: LevelScene.create plays the evolution first if formFor gives a new form.
-  nextLevel() {
-    this.scene.restart({ run: this.run });
+  // Back to the level map (the real run, even after a practice replay). Playing the next level from
+  // there goes through LevelScene.create, which plays the evolution first if there is a new form.
+  toMap(extra = {}) {
+    const run = this.run.replay ? load().run : this.run;
+    this.scene.start('TrailMapScene', { run, ...extra });
   }
 
   // Locked stop: a small shake and a lock icon, nothing else (PRD 6.4).

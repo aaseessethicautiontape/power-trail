@@ -111,6 +111,53 @@ export function renderMap(scene, level, L, { compact = false } = {}) {
   };
 }
 
+// Bakes one biome band of the level-select trail map (Candy Crush style) into a RenderTexture.
+// It reuses this file's ground, road and decor painters through a pseudo-layout, so every stretch
+// of the map looks like the levels of that biome (Sunny Meadow grass and pebble road, Coral Beach
+// sand and plank road, ...). `plan`: { geo, rect, decor, band, k, above, below } where geo/rect
+// come from src/art/trail.js, k is the bake scale and above/below are the neighbouring biome keys
+// (the band fades toward a shared colour at each seam, so biomes blend instead of cutting).
+// Draws in WORLD coordinates: place the returned texture at (0, rect.top).
+export function renderTrailBand(scene, biomeKey, plan) {
+  const { geo, rect, decor, band, above, below } = plan;
+  const pal = paletteFor(biomeKey);
+  const style = STYLE[biomeKey] ?? STYLE.meadow;
+  const rng = makeRng(hashSeed('trail-art', biomeKey, band, Math.round(geo.W)));
+  const W = geo.W;
+  const H = Math.ceil(rect.height);
+  const k = Math.min(plan.k ?? 1, MAX_TEXTURE / H, MAX_TEXTURE / W);
+  const shift = (p) => ({ x: p.x, y: p.y - rect.top });
+  const L = {
+    W, H, seed: `trail${band}`, mode: 'trail', rivers: [], ponds: [], plateaus: [], connectors: [],
+    paths: [{ zone: band, kind: 'trail', pts: geo.road.filter((p) => p.y > rect.top - 60 && p.y < rect.bottom + 60).map(shift) }],
+    decor: decor.map((d) => ({ ...d, y: d.y - rect.top })),
+  };
+
+  const g = scene.make.graphics({ add: false });
+  GROUND[style.ground](g, L, pal, rng);
+  // Fade toward a colour shared with the neighbouring biome at each seam.
+  const fade = (neighbour, atTop) => {
+    if (!neighbour) return;
+    const seam = lerpColour(pal.ground[0], paletteFor(neighbour).ground[0], 0.5);
+    const depth = 90;
+    for (let i = 0; i < 18; i++) {
+      const y0 = atTop ? (i * depth) / 18 : H - ((i + 1) * depth) / 18;
+      g.fillStyle(seam, 0.9 * (1 - i / 18) ** 1.5).fillRect(0, y0, W, depth / 18 + 1);
+    }
+  };
+  fade(above, true);
+  fade(below, false);
+  drawPaths(g, L, pal, style, rng);
+  drawDecor(g, L, pal, style);
+
+  const rt = scene.add.renderTexture(0, 0, Math.ceil(W * k), Math.ceil(H * k)).setOrigin(0);
+  g.setScale(k);
+  rt.draw(g, 0, 0);
+  rt.setScale(1 / k);
+  g.destroy();
+  return rt;
+}
+
 // ---------- shared helpers ----------
 
 function softBlob(g, x, y, rx, ry, colour, alpha) {

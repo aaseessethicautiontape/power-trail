@@ -7,7 +7,7 @@ import { LEVEL_TUNING, STARTERS } from './config.js';
 
 const invalid = (reason) => ({ verified: false, reason });
 
-export function verifyRun({ starter, runSeed, history } = {}, dex) {
+export function verifyRun({ starter, runSeed, history } = {}, dex, { includeResults = false } = {}) {
   if (!dex) return invalid('Server data unavailable');
   if (typeof starter !== 'string' || typeof runSeed !== 'string' || !runSeed || !Array.isArray(history)) {
     return invalid('Invalid run data');
@@ -52,7 +52,7 @@ export function verifyRun({ starter, runSeed, history } = {}, dex) {
           const earned = starsFor(level, powerBeforeBoss);
           levelsCleared++;
           stars += earned;
-          results.push({ level: expectedLevel, stars: earned, faints: levelFaints });
+          results.push({ level: expectedLevel, stars: earned, faints: levelFaints, power: powerBeforeBoss, best: level.best });
           if (expectedLevel % LEVEL_TUNING.heartEvery === 0 && hearts < LEVEL_TUNING.lives) hearts++;
           continue;
         }
@@ -74,5 +74,7 @@ export function verifyRun({ starter, runSeed, history } = {}, dex) {
     return invalid(error instanceof Error && /^Level \d+:/.test(error.message) ? error.message : 'Could not rebuild run');
   }
 
-  return { verified: true, levelsCleared, stars, hearts };
+  return includeResults
+    ? { verified: true, levelsCleared, stars, hearts, levelResults: results }
+    : { verified: true, levelsCleared, stars, hearts };
 }

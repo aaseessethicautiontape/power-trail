@@ -16,5 +16,7 @@ export default function handler(req, res) {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const result = verifyRun({ starter: body.starter, runSeed: body.runSeed, history: body.history }, getDex());
   if (!result.verified) return res.status(400).json({ reason: result.reason });
-  return res.status(200).json(result);
+  return res.status(200).json({
+    verified: true, levelsCleared: result.levelsCleared, stars: result.stars, hearts: result.hearts,
+  });
 }

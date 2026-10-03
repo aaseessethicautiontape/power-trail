@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 
 let cachedDb;
@@ -16,4 +17,9 @@ export function firestore() {
   }
   cachedDb = getFirestore();
   return cachedDb;
+}
+
+export function auth() {
+  firestore();
+  return getAuth();
 }

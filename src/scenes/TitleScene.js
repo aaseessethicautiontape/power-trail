@@ -4,6 +4,8 @@ import { STARTERS, STARTER_KEYS, LEVEL_TUNING } from '../../shared/config.js';
 import { formFor } from '../../shared/level.js';
 import { load, save, newRunSeed, dailyRunSeed } from '../save.js';
 import { setSoundMuted, setSoundEffectsEnabled } from '../audio.js';
+import { firebaseAuth, observeFirebaseAuth, signInWithGoogle, signOutGoogle, firstName } from '../firebase.js';
+import { syncProgress } from '../cloud.js';
 import { pokemonKey } from '../assets.js';
 import { getScreen, safeRect, watchResize } from '../layout/screen.js';
 import {
@@ -41,6 +43,14 @@ export default class TitleScene extends Phaser.Scene {
     this.dialog = null;
     this.root = null;
     this.firstLayout = true;
+    this.accountBusy = false;
+    this.accountError = '';
+    const unsubscribe = observeFirebaseAuth((user) => {
+      this.save_ = load();
+      if (this.root && this.scene.isActive('TitleScene')) this.layout();
+      if (user) this.syncSignedIn();
+    });
+    this.events.once('shutdown', unsubscribe);
 
     this.buildBackground();
     this.layout();
@@ -82,9 +92,9 @@ export default class TitleScene extends Phaser.Scene {
     this.drawLogo(scr.w / 2, area.top + logoH / 2, logoFont, s);
     let y = area.top + Math.max(bar.h, logoH) + gap * 0.4;
     // Short landscape screens (phones on their side): the level chips share the Best row, so the
-    // starter cards keep their height.
-    const inline = scr.h < 500 ? this.runChips(area.width * 0.6, Math.max(0.8, s)) : null;
-    y = this.drawBest(scr.w / 2, y, s, gap, inline);
+    // starter cards keep their height (and the Google button shrinks to an icon in the top bar).
+    const inline = scr.h < 500 ? this.runChips(area.width * 0.5, Math.max(0.8, s)) : null;
+    y = this.drawInfoRow(scr.w / 2, y, s, gap, area.width, [inline]);
 
     const bs = Phaser.Math.Clamp(Math.min(s, (scr.h * 0.16) / 84), 0.6, 1.4);
     let btnBlock = 92 * bs;
@@ -110,7 +120,7 @@ export default class TitleScene extends Phaser.Scene {
     const logoH = logoFont * 1.22;
     this.drawLogo(scr.w / 2, y + logoH / 2, logoFont, s);
     y += logoH + gap * 0.4;
-    y = this.drawBest(scr.w / 2, y, s, gap);
+    y = this.drawInfoRow(scr.w / 2, y, s, gap, area.width);
 
     const bs = Phaser.Math.Clamp(s, 0.8, 1.2);
     const blockBottom = this.drawButtonsStack(scr.w / 2, area.bottom, area.width, bs, gap);
@@ -168,8 +178,133 @@ export default class TitleScene extends Phaser.Scene {
     dex.setPosition(area.left + dex.btnW / 2, area.top + (h - 8 * s) / 2);
     const cogSize = Math.max(44, 60 * s);
     const cog = makeCog(this, area.right - cogSize / 2, area.top + cogSize / 2, () => this.openDialog('settings'), cogSize);
-    this.root.add([dex, cog]);
-    return { h: Math.max(h, cogSize), dexW: Math.max(dex.btnW, cogSize) };
+    const items = [dex, cog];
+    let side = Math.max(dex.btnW, cogSize);
+    if (this.compactBar(scr)) {
+      // No room for the full "Continue with Google" pill: a round Google button beside the cog.
+      const icon = this.accountIcon(cogSize);
+      icon.setPosition(area.right - cogSize - 10 * s - cogSize / 2, area.top + cogSize / 2);
+      items.push(icon);
+      side = Math.max(side, cogSize * 2 + 10 * s);
+    }
+    this.root.add(items);
+    return { h: Math.max(h, cogSize), dexW: side };
+  }
+
+  // Short landscape screens keep the top bar for a round account button.
+  compactBar(scr) {
+    return !scr.portrait && scr.h < 500;
+  }
+
+  // ---------- Google account ----------
+
+  // The Google "G", drawn in code (four coloured arcs and a bar), centred on (0,0).
+  drawGoogleG(g, R) {
+    const lw = R * 0.42;
+    const arc = (colour, a0, a1) => {
+      g.lineStyle(lw, colour, 1).beginPath().arc(0, 0, R * 0.72, Phaser.Math.DegToRad(a0), Phaser.Math.DegToRad(a1)).strokePath();
+    };
+    arc(0xea4335, 215, 325);
+    arc(0xfbbc05, 125, 215);
+    arc(0x34a853, 40, 125);
+    arc(0x4285f4, 330, 400);
+    g.fillStyle(0x4285f4, 1).fillRect(0, -lw / 2, R * 0.72 + lw / 2, lw);
+  }
+
+  // Signed in: a round avatar with the player's initial. Signed out: the Google "G".
+  accountGlyph(R) {
+    const g = this.add.graphics();
+    const user = firebaseAuth.currentUser;
+    if (!user) {
+      this.drawGoogleG(g, R);
+      return g;
+    }
+    g.fillStyle(0x16a34a, 1).fillCircle(0, 0, R);
+    g.fillStyle(0xffffff, 0.25).fillEllipse(0, -R * 0.4, R * 1.5, R * 0.8);
+    const initial = makeText(this, 0, 0, firstName(user)[0].toUpperCase(), {
+      fontFamily: FONT_TITLE, fontSize: px(R * 1.4), color: '#ffffff',
+    }).setOrigin(0.5);
+    return this.add.container(0, 0, [g, initial]);
+  }
+
+  // Round white account button for the top bar.
+  accountIcon(size) {
+    const g = this.add.graphics();
+    g.fillStyle(0x000000, 0.2).fillCircle(2, size * 0.1 + 3, size / 2);
+    g.fillStyle(0xffffff, 1).fillCircle(0, 0, size / 2);
+    g.lineStyle(2, 0xdadce0, 1).strokeCircle(0, 0, size / 2);
+    const c = this.add.container(0, 0, [g, this.accountGlyph(size * 0.3)]);
+    makeTappable(c, size, size);
+    c.on('pointerup', () => this.toggleGoogleAccount());
+    return c;
+  }
+
+  // "Continue with Google" (or "Hi, Sam" when signed in): a white pill under the logo.
+  accountPill(s, maxW) {
+    const user = firebaseAuth.currentUser;
+    const h = Math.max(46, 50 * s);
+    const font = Math.max(15, 18 * s);
+    const label = this.accountBusy ? 'Signing in…' : user ? `Hi, ${firstName(user)}` : 'Continue with Google';
+    const t = makeText(this, 0, 0, label, { fontStyle: '900', fontSize: px(font), color: '#3C4043' }).setOrigin(0, 0.5);
+    const R = h * 0.3;
+    let w = h * 0.45 + R * 2 + 10 + t.width + h * 0.5;
+    if (w > maxW) { t.setScale((maxW - h * 0.95 - R * 2 - 10) / t.width); w = maxW; }
+    const g = this.add.graphics();
+    g.fillStyle(0x000000, 0.2).fillRoundedRect(-w / 2 + 2, -h / 2 + 4, w, h, h / 2);
+    g.fillStyle(0xffffff, 1).fillRoundedRect(-w / 2, -h / 2, w, h, h / 2);
+    g.lineStyle(2, 0xdadce0, 1).strokeRoundedRect(-w / 2, -h / 2, w, h, h / 2);
+    const glyph = this.accountGlyph(R).setPosition(-w / 2 + h * 0.45 + R, 0);
+    t.setPosition(-w / 2 + h * 0.45 + R * 2 + 10, 0);
+    const pill = this.add.container(0, 0, [g, glyph, t]);
+    makeTappable(pill, w, h);
+    pill.on('pointerup', () => this.toggleGoogleAccount());
+    Object.assign(pill, { rowW: w, rowH: h });
+    return pill;
+  }
+
+  async toggleGoogleAccount() {
+    if (this.accountBusy) return;
+    if (firebaseAuth.currentUser) {
+      this.openDialog('account');
+      return;
+    }
+    this.accountBusy = true;
+    this.layout();
+    let error = '';
+    try {
+      await signInWithGoogle();
+    } catch (err) {
+      console.warn('Google sign-in failed:', err?.code || 'unknown error');
+      error = ({
+        'auth/unauthorized-domain': 'This website is not allowed to use Google sign-in yet.',
+        'auth/network-request-failed': 'No internet connection. Try again.',
+        'auth/too-many-requests': 'Too many tries. Wait a moment and try again.',
+      })[err?.code] ?? 'Google sign-in did not work. Please try again.';
+    } finally {
+      this.accountBusy = false;
+      this.save_ = load();
+      if (this.scene.isActive('TitleScene')) this.layout();
+    }
+    if (error) this.showAccountMessage(error);
+  }
+
+  // After signing in: bring the account's levels and scores onto this device (and the other way).
+  async syncSignedIn() {
+    if (this.syncing) return;
+    this.syncing = true;
+    try {
+      const result = await syncProgress();
+      this.save_ = load();
+      if (this.scene.isActive('TitleScene') && this.root) {
+        this.selected = this.save_.run?.starter ?? this.selected;
+        this.layout();
+        if (result?.adoptedRun) this.showAccountMessage('Your saved level is loaded. Tap CONTINUE!');
+      }
+    } catch (error) {
+      console.warn('Cloud progress sync failed:', error?.message || 'unknown error');
+    } finally {
+      this.syncing = false;
+    }
   }
 
   // Width of the logo per 1px of font size, measured once.
@@ -211,27 +346,48 @@ export default class TitleScene extends Phaser.Scene {
     }
   }
 
-  // "Best: Level 23" pill. `extra` (optional, e.g. level chips) sits beside it on the same row.
-  drawBest(x, y, s, gap, extra = null) {
-    if (!(this.save_.bestLevel > 0)) return y;
+  // "Best: Level 23" pill (a container with rowW / rowH), or null before the first clear.
+  bestPill(s) {
+    if (!(this.save_.bestLevel > 0)) return null;
     const font = Math.max(16, 26 * s);
     const ph = font * 1.55;
     const best = makeText(this, 0, 0, `Best: Level ${this.save_.bestLevel}`, {
       fontFamily: FONT_TITLE, fontSize: px(font), color: '#ffffff', stroke: '#1E3A8A', strokeThickness: Math.max(4, 6 * s),
     }).setOrigin(0.5);
     const w = best.width + font * 1.5;
-    const rowH = Math.max(ph, extra?.rowH ?? 0);
-    const total = w + (extra ? gap + extra.rowW : 0);
-    const px0 = x - total / 2 + w / 2;
-    best.setPosition(px0, y + rowH / 2);
     const pill = this.add.graphics();
-    pill.fillStyle(0x1e3a8a, 0.28).fillRoundedRect(px0 - w / 2, y + rowH / 2 - ph / 2, w, ph, ph / 2);
-    this.root.add([pill, best]);
-    if (extra) {
-      extra.setPosition(x + total / 2 - extra.rowW / 2, y + rowH / 2);
-      this.root.add(extra);
+    pill.fillStyle(0x1e3a8a, 0.28).fillRoundedRect(-w / 2, -ph / 2, w, ph, ph / 2);
+    const c = this.add.container(0, 0, [pill, best]);
+    Object.assign(c, { rowW: w, rowH: ph });
+    return c;
+  }
+
+  // The row under the logo: the Best pill, the Google account pill and (on short screens) the
+  // level chips, centred and wrapped onto more rows when they don't fit. Returns the next free y.
+  drawInfoRow(x, y, s, gap, maxW, extras = []) {
+    const items = [this.bestPill(s), this.compactBar(getScreen(this)) ? null : this.accountPill(s, maxW), ...extras].filter(Boolean);
+    const rows = [];
+    let row = [];
+    let used = 0;
+    for (const it of items) {
+      if (row.length && used + gap + it.rowW > maxW) { rows.push(row); row = []; used = 0; }
+      used += (row.length ? gap : 0) + it.rowW;
+      row.push(it);
     }
-    return y + rowH + gap * 0.5;
+    if (row.length) rows.push(row);
+    let yy = y;
+    for (const r of rows) {
+      const rowH = Math.max(...r.map((i) => i.rowH));
+      const total = r.reduce((sum, i) => sum + i.rowW, 0) + gap * (r.length - 1);
+      let cx = x - total / 2;
+      for (const it of r) {
+        it.setPosition(cx + it.rowW / 2, yy + rowH / 2);
+        this.root.add(it);
+        cx += it.rowW + gap;
+      }
+      yy += rowH + gap * 0.4;
+    }
+    return yy + gap * 0.1;
   }
 
   // ---------- starter cards ----------
@@ -425,27 +581,25 @@ export default class TitleScene extends Phaser.Scene {
         scale: bs, width: w, height: 72, fontSize: 30,
       }));
       return cont;
-    } else {
-      const w = Math.min(320, (maxW / bs - gap / bs) / 2);
-      const off = (w * bs + gap) / 2;
-      this.root.add(makeButton(this, cx - off, y, 'START', 'main', () => this.startRun(), {
-        scale: bs, width: w, height: 84, fontSize: 40,
-      }));
-      this.root.add(makeButton(this, cx + off, y, 'DAILY TRAIL', 'secondary', () => this.startDailyRun(), {
-        scale: bs, width: w, height: 84, fontSize: 28,
-      }));
     }
+    const w = Math.min(320, (maxW / bs - gap / bs) / 2);
+    const off = (w * bs + gap) / 2;
+    this.root.add(makeButton(this, cx - off, y, 'START', 'main', () => this.startRun(), {
+      scale: bs, width: w, height: 84, fontSize: 40,
+    }));
+    this.root.add(makeButton(this, cx + off, y, 'DAILY TRAIL', 'secondary', () => this.startDailyRun(), {
+      scale: bs, width: w, height: 84, fontSize: 28,
+    }));
+    return null;
   }
 
   // Full-width stacked buttons at the bottom (portrait). Returns the block's top y.
   drawButtonsStack(cx, bottom, width, bs, gap) {
     const h = 72;
-    const count = this.save_.run ? 3 : 2;
-    const block = count * (h + 8) * bs;
     const w = width / bs;
-    const startY = bottom - (h + 8) * bs + (h * bs) / 2;
+    const unit = (h + 8) * bs;
+    const startY = bottom - unit + (h * bs) / 2;
     if (this.save_.run) {
-      const unit = (h + 8) * bs;
       const contY = startY - 2 * unit;
       const cont = this.continueButton(cx, contY, bs, w, h);
       this.root.add(cont);
@@ -458,13 +612,13 @@ export default class TitleScene extends Phaser.Scene {
       const top = contY - (h * bs) / 2;
       return top - this.drawRunChips(cx, top - gap * 0.5, w * bs, bs) - gap * 0.5;
     }
-    this.root.add(makeButton(this, cx, startY, 'START', 'main', () => this.startRun(), {
+    this.root.add(makeButton(this, cx, startY - unit, 'START', 'main', () => this.startRun(), {
       scale: bs, width: w, height: h, fontSize: 38,
     }));
-    this.root.add(makeButton(this, cx, startY - (h + 8) * bs, 'DAILY TRAIL', 'secondary', () => this.startDailyRun(), {
+    this.root.add(makeButton(this, cx, startY, 'DAILY TRAIL', 'secondary', () => this.startDailyRun(), {
       scale: bs, width: w, height: h, fontSize: 30,
     }));
-    return startY - (h + 8) * bs - (h * bs) / 2;
+    return startY - unit - (h * bs) / 2;
   }
 
   // Chips for every level cleared this run (PRD 4.8), bottom edge at `bottom`. Tap one for its
@@ -498,7 +652,7 @@ export default class TitleScene extends Phaser.Scene {
     };
     this.save_.run = run;
     save(this.save_);
-    this.scene.start('LevelScene', { run });
+    this.scene.start('TrailMapScene', { run });
   }
 
   startDailyRun() {
@@ -510,8 +664,18 @@ export default class TitleScene extends Phaser.Scene {
     this.startRun(seed);
   }
 
+  // Continue and Start both lead to the level map, where your Pokémon waits on the current level.
   continueRun() {
-    this.scene.start('LevelScene', { run: this.save_.run });
+    this.scene.start('TrailMapScene', { run: this.save_.run });
+  }
+
+  showAccountMessage(message) {
+    // Mid-screen, over the starter cards: the buttons stay tappable and uncovered.
+    const note = makeText(this, this.scale.width / 2, this.scale.height * 0.46, message, {
+      fontFamily: FONT_TITLE, fontSize: px(Math.max(16, Math.min(24, this.scale.width / 20))), color: '#ffffff', align: 'center',
+      backgroundColor: '#16325F', padding: { x: 16, y: 10 }, wordWrap: { width: this.scale.width * 0.86 },
+    }).setOrigin(0.5).setDepth(20);
+    this.time.delayedCall(2800, () => note.destroy());
   }
 
   // ---------- dialogs (rebuilt on resize) ----------
@@ -536,6 +700,21 @@ export default class TitleScene extends Phaser.Scene {
           { label: 'Reduce motion', get: () => settings.reduceMotion, set: (on) => { settings.reduceMotion = on; save(this.save_); } },
         ],
         buttons: [{ label: 'Done', colour: 'main', onClick: (close) => close() }],
+      }
+      : kind === 'account'
+      ? {
+        title: `Hi, ${firstName(firebaseAuth.currentUser)}!`,
+        message: 'Your levels and scores are saved to your Google account, so you can pick up on any device.',
+        width: 540,
+        buttons: [
+          { label: 'Done', colour: 'main', onClick: (close) => close() },
+          { label: 'Sign out', colour: 'secondary', onClick: async (close) => {
+            close();
+            await signOutGoogle().catch(() => {});
+            this.save_ = load();
+            this.layout();
+          } },
+        ],
       }
       : kind === 'daily-confirm'
       ? {
